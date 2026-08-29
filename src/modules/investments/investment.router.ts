@@ -10,6 +10,7 @@ import {
   updateInvestmentValue,
   getInvestmentStats,
   completeInvestment,
+  topUpInvestment,
 } from "./investment.controller";
 import { verifySupabaseToken, requireAuth, requireRole } from "@/middlewares/auth.middleware";
 
@@ -28,6 +29,7 @@ router.get("/:investmentId", getInvestmentById);
 // User investment management
 router.post("/:investmentId/maturity-action", setMaturityAction);
 router.put("/:investmentId/update-value", updateInvestmentValue);
+router.post("/:investmentId/top-up", topUpInvestment);
 
 // Admin routes (require admin role)
 router.get("/", requireRole(["admin", "invest_admin"]), getAllInvestments);

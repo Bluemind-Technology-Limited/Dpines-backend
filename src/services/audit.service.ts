@@ -45,9 +45,22 @@ export class AuditService {
   // Log an administrative action
   async logAction(input: AuditLogInput): Promise<AuditLogEntry> {
     try {
+      let resolvedAdminId = input.adminId;
+      if (resolvedAdminId === "00000000-0000-0000-0000-000000000000" || resolvedAdminId === "system") {
+        const firstAdmin = await prisma.userProfile.findFirst({
+          where: { role: "admin" },
+        });
+        if (firstAdmin) {
+          resolvedAdminId = firstAdmin.id;
+        } else {
+          const anyUser = await prisma.userProfile.findFirst();
+          if (anyUser) resolvedAdminId = anyUser.id;
+        }
+      }
+
       // Verify admin exists
       const admin = await prisma.userProfile.findUnique({
-        where: { id: input.adminId },
+        where: { id: resolvedAdminId },
       });
 
       if (!admin) {
@@ -57,7 +70,7 @@ export class AuditService {
       // Create audit log entry
       const auditLog = await prisma.auditLog.create({
         data: {
-          admin_id: input.adminId,
+          admin_id: resolvedAdminId,
           target_user_id: input.targetUserId,
           action: input.action,
           old_values: input.oldValues,

@@ -60,6 +60,7 @@ export class TicketService {
         where,
         include: {
           ticket_messages: true,
+          user_profiles: true,
         },
         orderBy: {
           created_at: "desc",

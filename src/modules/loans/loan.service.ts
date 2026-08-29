@@ -12,6 +12,7 @@ import { paymentService } from "@/services/payment.service";
 import { ledgerService } from "@/services/ledger.service";
 import { auditService } from "@/services/audit.service";
 import notificationService from "@/modules/notifications/notification.service";
+import { edgeFunctionService } from "@/services/edge-function.service";
 
 export class LoanService {
   async createLoan(
@@ -128,6 +129,9 @@ export class LoanService {
     try {
       const loan = await prisma.loan.findUnique({
         where: { id: loanId },
+        include: {
+          users: true,
+        },
       });
 
       if (!loan) {
@@ -155,6 +159,21 @@ export class LoanService {
           next_due_date: nextDueDate,
         },
       });
+
+      // Send loan approved email asynchronously using Edge Function
+      if ((loan as any).users) {
+        const user = (loan as any).users;
+        edgeFunctionService.sendLoanApprovedEmail(
+          user.email,
+          user.first_name || "Borrower",
+          Number(approvedLoan.amount),
+          approvedLoan.id,
+          Number(approvedLoan.monthly_payment),
+          approvedLoan.term_months
+        ).catch((err) => {
+          console.error("Failed to trigger loan approved email edge function:", err);
+        });
+      }
 
       return approvedLoan as unknown as Loan;
     } catch (error) {
@@ -244,6 +263,9 @@ export class LoanService {
       // Get the loan
       const loan = await prisma.loan.findUnique({
         where: { id: (payment as any).loanId },
+        include: {
+          users: true,
+        },
       });
 
       if (!loan) {
@@ -279,6 +301,21 @@ export class LoanService {
           approved_at: new Date(),
         },
       });
+
+      // Send repayment processed email asynchronously using Edge Function
+      if ((loan as any).users) {
+        const user = (loan as any).users;
+        edgeFunctionService.sendRepaymentProcessedEmail(
+          user.email,
+          user.first_name || "Borrower",
+          Number((payment as any).amount),
+          (payment as any).monthNumber || 1,
+          loan.id,
+          Number(paymentCalculation.newPrincipalBalance)
+        ).catch((err) => {
+          console.error("Failed to trigger repayment processed email edge function:", err);
+        });
+      }
 
       // Log transaction: Payment received
       await ledgerService.logLoanPaymentReceived(
@@ -572,6 +609,7 @@ export class LoanService {
         where: { id: loanId },
         data: {
           principal_balance: newPrincipalBalance,
+          status: newPrincipalBalance === 0 ? ("completed" as any) : (loan as any).status,
         },
       });
 
@@ -861,19 +899,18 @@ export class LoanService {
       const newDueDate = new Date(currentDueDate);
       newDueDate.setMonth(newDueDate.getMonth() + 1);
 
-      // Update monthly payment for new principal
-      const interestRate = Number(loan.interest_rate);
-      const remainingTerm = newTerm;
-      const newMonthlyPayment = calculateMonthlyPayment(newPrincipal, interestRate, remainingTerm);
+
+      const oldRolledBalance = Number((loan as any).rolled_balance || 0);
+      const newRolledBalance = oldRolledBalance + feeAmount;
 
       await prisma.loan.update({
         where: { id: loanId },
         data: {
           principal_balance: newPrincipal,
           term_months: newTerm,
-          monthly_payment: newMonthlyPayment,
           next_due_date: newDueDate,
           default_charge_accrued: 0,
+          rolled_balance: newRolledBalance,
         },
       });
 
@@ -918,6 +955,42 @@ export class LoanService {
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw new AppError(500, "Failed to capitalize and rollover loan");
+    }
+  }
+
+  async syncRolloverBalances(): Promise<void> {
+    try {
+      const activeLoans = await prisma.loan.findMany({
+        where: {
+          status: {
+            in: ["active", "overdue"],
+          },
+        },
+      });
+
+      for (const loan of activeLoans) {
+        const rollovers = await prisma.transaction_ledger.findMany({
+          where: {
+            source_id: loan.id,
+            type: "rollover" as any,
+          },
+        });
+
+        const totalRollovers = rollovers.reduce(
+          (sum, r) => sum + Number(r.amount || 0),
+          0
+        );
+
+        await prisma.loan.update({
+          where: { id: loan.id },
+          data: {
+            rolled_balance: totalRollovers,
+          },
+        });
+      }
+      console.log("Successfully synchronized all loan rollover balances.");
+    } catch (error) {
+      console.error("Failed to sync rollover balances:", error);
     }
   }
 }

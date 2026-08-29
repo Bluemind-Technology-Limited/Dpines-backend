@@ -221,6 +221,84 @@ export class UserService {
       throw new AppError(500, "Failed to fetch user stats");
     }
   }
+
+  async createUserByAdmin(
+    email: string,
+    firstName: string,
+    lastName: string,
+    phoneNumber: string,
+    address: string
+  ): Promise<UserProfile> {
+    try {
+      // 1. Check if user already exists
+      const existingUser = await prisma.userProfile.findUnique({
+        where: { email },
+      });
+
+      if (existingUser) {
+        throw new AppError(400, "User with this email already exists");
+      }
+
+      // 2. Create user in Supabase Auth
+      const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+        email,
+        email_confirm: true,
+        user_metadata: {
+          first_name: firstName,
+          last_name: lastName,
+        },
+      });
+
+      if (authError || !authData.user) {
+        throw new AppError(400, authError?.message || "Failed to create auth user in Supabase");
+      }
+
+      // 3. Create profile in database using Prisma
+      const userProfile = await prisma.userProfile.create({
+        data: {
+          id: authData.user.id,
+          email,
+          first_name: firstName,
+          last_name: lastName,
+          phone_number: phoneNumber,
+          address,
+          role: "user",
+        },
+      });
+
+      // 4. Fetch the admin template using Prisma
+      const template = await prisma.communication_templates.findFirst({
+        where: {
+          name: "admin_account_created",
+          is_active: true,
+        },
+      });
+
+      const subject = template?.subject || "Your DPINES Account Has Been Created";
+      let body = template?.body || "Hello {{first_name}},\n\nYour account has been created by the administrator on DPINES Nigeria.\n\nYou can access your account using your email: {{email}}.\n\nTo log in and set up your password, please go to the login screen and click 'Forgot Password' or reset your password using OTP.\n\nThank you,\nDPINES Support";
+
+      // Replace place holders
+      body = body.replace(/\{\{first_name\}\}/g, firstName);
+      body = body.replace(/\{\{email\}\}/g, email);
+
+      // 5. Send communication email
+      edgeFunctionService.callFunction("send-communication", {
+        to: email,
+        subject,
+        body,
+      }).catch((err) => {
+        console.error("Failed to send admin welcome email:", err);
+      });
+
+      return userProfile;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, error instanceof Error ? error.message : "Failed to create user by admin");
+    }
+  }
 }
+
+import supabaseAdmin from "@/configs/supabase";
+import { edgeFunctionService } from "@/services/edge-function.service";
 
 export const userService = new UserService();

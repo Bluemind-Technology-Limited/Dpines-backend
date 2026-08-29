@@ -157,3 +157,25 @@ export const completeInvestment = asyncHandler(
     sendSuccess(res, investment, "Investment completed successfully");
   }
 );
+
+import { z } from "zod";
+
+const topUpInvestmentSchema = z.object({
+  amount: z.number().positive(),
+  method: z.enum(["bank_transfer", "wallet", "card"]).default("bank_transfer"),
+});
+
+export const topUpInvestment = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { investmentId } = req.params;
+    const body = topUpInvestmentSchema.parse(req.body);
+
+    const investment = await investmentService.topUpInvestment(
+      investmentId,
+      body.amount,
+      body.method
+    );
+
+    sendSuccess(res, investment, "Investment topped up successfully");
+  }
+);

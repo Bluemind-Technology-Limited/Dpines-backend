@@ -9,6 +9,7 @@ import { calculateInvestmentCurrentValue, getMonthsBetweenDates } from "@/lib/ut
 import { ledgerService } from "@/services/ledger.service";
 import { auditService } from "@/services/audit.service";
 import notificationService from "@/modules/notifications/notification.service";
+import { edgeFunctionService } from "@/services/edge-function.service";
 
 export class InvestmentService {
   async createInvestment(
@@ -187,6 +188,9 @@ export class InvestmentService {
     try {
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: {
+          users: true,
+        },
       });
 
       if (!investment) {
@@ -204,10 +208,133 @@ export class InvestmentService {
         },
       });
 
+      // Notify admin on maturity action asynchronously using Edge Function
+      if (investment && !investment.maturity_action && action && (investment as any).users) {
+        const user = (investment as any).users;
+        const userName = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "User";
+        edgeFunctionService.notifyAdminMaturityAction(
+          updatedInvestment.id,
+          userName,
+          action,
+          Number(updatedInvestment.amount)
+        ).catch((err) => {
+          console.error("Failed to trigger maturity action admin notification edge function:", err);
+        });
+      }
+
       return updatedInvestment;
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw new AppError(500, "Failed to set maturity action");
+    }
+  }
+
+  async topUpInvestment(
+    investmentId: string,
+    amount: number,
+    method: "bank_transfer" | "wallet" | "card" = "bank_transfer"
+  ): Promise<Investment> {
+    try {
+      const investment = await prisma.investment.findUnique({
+        where: { id: investmentId },
+        include: {
+          users: true,
+        },
+      });
+
+      if (!investment) {
+        throw new AppError(404, "Investment not found");
+      }
+
+      if (investment.status !== "active" || !investment.start_date) {
+        throw new AppError(400, "Investment is not active or has not started");
+      }
+
+      const now = new Date();
+
+      // 1. Calculate accrued months elapsed up to today
+      const monthsElapsed = getMonthsBetweenDates(
+        investment.start_date,
+        now
+      );
+
+      // 2. Calculate the current value (capitalized up to the top-up moment)
+      const currentValue = calculateInvestmentCurrentValue(
+        Number(investment.initial_amount) || Number(investment.amount),
+        Number(investment.interest_rate),
+        monthsElapsed,
+        investment.payout_frequency
+      );
+
+      // 3. Compute new combined principal value
+      const newPrincipal = currentValue + amount;
+
+      // 4. Calculate remaining term months
+      const remainingMonths = Math.max(1, investment.term_months - monthsElapsed);
+
+      // 5. Update the investment in the database
+      const updatedInvestment = await prisma.investment.update({
+        where: { id: investmentId },
+        data: {
+          amount: newPrincipal,
+          initial_amount: newPrincipal,
+          current_value: newPrincipal,
+          start_date: now, // Reset the baseline date for compound interest going forward
+          term_months: remainingMonths,
+        },
+      });
+
+      // 6. Log transaction to ledger
+      await ledgerService.logTransaction({
+        userId: investment.user_id,
+        amount,
+        type: "deposit" as any,
+        method: method as any,
+        sourceId: investmentId,
+        description: `Investment Top-Up of ₦${amount} (New Balance: ₦${newPrincipal})`,
+        metadata: {
+          previousPrincipal: Number(investment.amount),
+          capitalizedAccruedInterest: currentValue - Number(investment.amount),
+          topUpAmount: amount,
+          newPrincipal,
+        },
+      });
+
+      // 7. Log audit action
+      await auditService.logAction({
+        adminId: investment.user_id, // Self or Admin, fallback to user
+        targetUserId: investment.user_id,
+        action: "investment_updated",
+        oldValues: {
+          amount: Number(investment.amount),
+          term_months: investment.term_months,
+          start_date: investment.start_date,
+        },
+        newValues: {
+          amount: newPrincipal,
+          term_months: remainingMonths,
+          start_date: now,
+        },
+      });
+
+      // 8. Trigger confirmation email via Edge Function
+      if ((investment as any).users) {
+        const user = (investment as any).users;
+        edgeFunctionService.sendInvestmentTopUpEmail(
+          user.email,
+          user.first_name || "Investor",
+          amount,
+          newPrincipal,
+          investment.id
+        ).catch((err) => {
+          console.error("Failed to trigger top-up email edge function:", err);
+        });
+      }
+
+      return updatedInvestment as unknown as Investment;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, "Failed to top up investment");
     }
   }
 
@@ -529,6 +656,9 @@ export class InvestmentService {
     try {
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: {
+          users: true,
+        },
       });
 
       if (!investment) {
@@ -630,6 +760,20 @@ export class InvestmentService {
         await notificationService.notifyInvestmentMaturity(investmentId);
       } catch (notifError) {
         console.error("Failed to send investment maturity notification:", notifError);
+      }
+
+      // Send rollover email asynchronously using Edge Function
+      if ((investment as any).users) {
+        const user = (investment as any).users;
+        edgeFunctionService.sendInvestmentRolloverEmail(
+          user.email,
+          user.first_name || "Investor",
+          Number(maturedValue),
+          investment.term_months,
+          investment.id
+        ).catch((err) => {
+          console.error("Failed to trigger rollover email edge function:", err);
+        });
       }
 
       return newInvestment as unknown as Investment;
@@ -1022,6 +1166,9 @@ export class InvestmentService {
     try {
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: {
+          users: true,
+        },
       });
 
       if (!investment) {
@@ -1037,6 +1184,20 @@ export class InvestmentService {
           maturity_action: action,
         },
       });
+
+      // Notify admin on maturity action asynchronously using Edge Function
+      if (investment && !investment.maturity_action && action && (investment as any).users) {
+        const user = (investment as any).users;
+        const userName = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "User";
+        edgeFunctionService.notifyAdminMaturityAction(
+          updatedInvestment.id,
+          userName,
+          action,
+          Number(updatedInvestment.amount)
+        ).catch((err) => {
+          console.error("Failed to trigger maturity action admin notification edge function:", err);
+        });
+      }
 
       // Log audit action
       await auditService.logAction({

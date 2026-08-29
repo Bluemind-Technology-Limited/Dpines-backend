@@ -111,3 +111,29 @@ export const getUsersStats = asyncHandler(
     sendSuccess(res, stats, "User stats fetched successfully");
   }
 );
+
+import { z } from "zod";
+
+const createUserByAdminSchema = z.object({
+  email: z.string().email(),
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  phoneNumber: z.string().optional().default(""),
+  address: z.string().optional().default(""),
+});
+
+export const createUserByAdmin = asyncHandler(
+  async (req: Request, res: Response) => {
+    const body = createUserByAdminSchema.parse(req.body);
+
+    const user = await userService.createUserByAdmin(
+      body.email,
+      body.firstName,
+      body.lastName,
+      body.phoneNumber,
+      body.address
+    );
+
+    sendSuccess(res, user, "User created successfully by admin");
+  }
+);

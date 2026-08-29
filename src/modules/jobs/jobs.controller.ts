@@ -40,12 +40,14 @@ router.post(
       throw new AppError(401, "Unauthorized: Invalid Cron Key");
     }
 
-    const result = await jobsService.executePaymentReminders();
+    // Run asynchronously in the background to prevent HTTP timeouts
+    jobsService.executePaymentReminders().catch((err) => {
+      console.error("Background payment reminders execution failed:", err);
+    });
 
-    res.status(200).json({
-      success: result.success,
-      message: result.message,
-      data: result,
+    res.status(202).json({
+      success: true,
+      message: "Payment reminders job triggered asynchronously in the background",
     });
   })
 );
@@ -59,12 +61,14 @@ router.post(
       throw new AppError(401, "Unauthorized: Invalid Cron Key");
     }
 
-    const result = await jobsService.executeLateFeeApplication();
+    // Run asynchronously in the background to prevent HTTP timeouts
+    jobsService.executeLateFeeApplication().catch((err) => {
+      console.error("Background late fee execution failed:", err);
+    });
 
-    res.status(200).json({
-      success: result.success,
-      message: result.message,
-      data: result,
+    res.status(202).json({
+      success: true,
+      message: "Late fee application job triggered asynchronously in the background",
     });
   })
 );
@@ -78,12 +82,14 @@ router.post(
       throw new AppError(401, "Unauthorized: Invalid Cron Key");
     }
 
-    const result = await jobsService.executeMaturityProcessing();
+    // Run asynchronously in the background to prevent HTTP timeouts
+    jobsService.executeMaturityProcessing().catch((err) => {
+      console.error("Background maturity processing execution failed:", err);
+    });
 
-    res.status(200).json({
-      success: result.success,
-      message: result.message,
-      data: result,
+    res.status(202).json({
+      success: true,
+      message: "Maturity processing job triggered asynchronously in the background",
     });
   })
 );

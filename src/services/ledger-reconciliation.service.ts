@@ -16,6 +16,8 @@ interface DeductionHistoryEntry {
   processedBy: string;
   processedAt: Date;
   ledgerId?: string;
+  type?: string;
+  method?: string;
 }
 
 interface DeductionSequenceValidation {
@@ -105,7 +107,9 @@ export class LedgerReconciliationService {
         prisma.transactionLedger.findMany({
           where: {
             source_id: loanId,
-            type: "deduction",
+            type: {
+              in: ["deduction", "charge", "rollover"] as any
+            },
           },
           orderBy: { created_at: "desc" },
           take: limit,
@@ -114,7 +118,9 @@ export class LedgerReconciliationService {
         prisma.transactionLedger.count({
           where: {
             source_id: loanId,
-            type: "deduction",
+            type: {
+              in: ["deduction", "charge", "rollover"] as any
+            },
           },
         }),
       ]);
@@ -124,7 +130,7 @@ export class LedgerReconciliationService {
         loanId: loanId,
         investmentId: d.metadata?.investmentId || "",
         userId: d.user_id,
-        amount: d.amount,
+        amount: Number(d.amount),
         allocatedInterest: d.metadata?.allocatedInterest || 0,
         allocatedFees: d.metadata?.allocatedFees || 0,
         allocatedPrincipal: d.metadata?.allocatedPrincipal || 0,
@@ -132,6 +138,8 @@ export class LedgerReconciliationService {
         processedBy: d.metadata?.processedBy || "system",
         processedAt: d.created_at,
         ledgerId: d.id,
+        type: d.type,
+        method: d.method,
       }));
 
       const totalDeducted = entries.reduce((sum, d) => sum + d.amount, 0);

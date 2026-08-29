@@ -260,10 +260,7 @@ export class PaymentService {
 
       // Calculate new status
       let newStatus: LoanStatus = (loan as any).status as LoanStatus;
-      if (
-        finalPrincipalBalance === 0 &&
-        newMarkedPayments.length === (loan as any).termMonths
-      ) {
+      if (finalPrincipalBalance === 0) {
         newStatus = "completed";
       } else if (lateDays > 0) {
         newStatus = "overdue";

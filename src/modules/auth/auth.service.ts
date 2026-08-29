@@ -1,5 +1,6 @@
 import prisma from "@/configs/database";
 import supabaseAdmin from "@/configs/supabase";
+import { edgeFunctionService } from "@/services/edge-function.service";
 import { AppError } from "@/middlewares/error.middleware";
 import type { UserRole } from "@/types";
 
@@ -87,6 +88,11 @@ export class AuthService {
           last_name: lastName,
           role,
         },
+      });
+
+      // Send welcome email asynchronously using Edge Function
+      edgeFunctionService.sendWelcomeEmail(email, firstName, lastName).catch((err) => {
+        console.error("Failed to trigger welcome email edge function:", err);
       });
 
       return userProfile;

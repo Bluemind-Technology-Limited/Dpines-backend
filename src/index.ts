@@ -36,9 +36,16 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-// Health check
-app.get("/health", (_req: Request, res: Response) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+import prisma from "@/configs/database";
+
+// Health check with Database Keep-Alive query
+app.get("/health", async (_req: Request, res: Response) => {
+  try {
+    await prisma.$executeRawUnsafe("SELECT 1");
+    res.json({ status: "ok", database: "connected", timestamp: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ status: "error", message: "Database connection failed" });
+  }
 });
 
 // API Routes
@@ -68,12 +75,34 @@ app.use((req: Request, res: Response) => {
 // Error Handler (must be last)
 app.use(errorHandler);
 
+import { loanService } from "@/modules/loans/loan.service";
+
 // Start server
 const PORT = env.PORT;
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log(`✓ Server running on http://localhost:${PORT}`);
   console.log(`✓ Environment: ${env.NODE_ENV}`);
   console.log(`✓ CORS enabled for: ${env.CORS_ORIGIN}`);
+
+  // Sync historical rollover balances in background on startup
+  loanService.syncRolloverBalances().catch((err) => {
+    console.error("Failed to run startup rollover balance sync:", err);
+  });
+
+  // Seed default admin account created template if it doesn't exist
+  prisma.communication_templates.upsert({
+    where: { name: "admin_account_created" },
+    update: {},
+    create: {
+      name: "admin_account_created",
+      subject: "Your DPINES Account Has Been Created",
+      body: "Hello {{first_name}},\n\nYour account has been created by the administrator on DPINES Nigeria.\n\nYou can access your account using your email: {{email}}.\n\nTo log in and set up your password, please go to the login screen and click 'Forgot Password' or reset your password using OTP.\n\nThank you,\nDPINES Support",
+      type: "email",
+      is_active: true,
+    },
+  }).catch((err) => {
+    console.error("Failed to seed default communication templates:", err);
+  });
 });
 
 // Graceful shutdown

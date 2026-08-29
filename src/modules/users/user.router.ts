@@ -8,6 +8,7 @@ import {
   searchUsers,
   updateUserRole,
   getUsersStats,
+  createUserByAdmin,
 } from "./user.controller";
 import { verifySupabaseToken, requireAuth, requireRole } from "@/middlewares/auth.middleware";
 
@@ -23,6 +24,7 @@ router.put("/me/profile", updateProfile);
 router.get("/me/dashboard-stats", getDashboardStats);
 
 // Admin routes
+router.post("/", requireRole(["admin"]), createUserByAdmin);
 router.get("/", requireRole(["admin"]), getAllUsers);
 router.get("/search", requireRole(["admin"]), searchUsers);
 router.get("/stats", requireRole(["admin"]), getUsersStats);

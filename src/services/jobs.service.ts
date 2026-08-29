@@ -249,9 +249,6 @@ class JobsService {
           next_due_date: {
             lt: now,
           },
-          user_id: {
-            not: null,
-          },
         },
       });
 
@@ -283,7 +280,8 @@ class JobsService {
 
           // Process 7-day rollover cycles (Capitalization & Term extension)
           while (daysOverdue >= 7) {
-            const baseAmount = Number(loan.amount) + Number(loan.total_interest);
+            const currentRolled = Number(loan.rolled_balance || 0);
+            const baseAmount = Number(loan.amount) + Number(loan.total_interest) + currentRolled;
             const feeToCapitalize = baseAmount * 0.07;
             await loanService.capitalizeAndRollOverLoan(
               loan.id,
@@ -305,7 +303,8 @@ class JobsService {
 
           // Apply remaining daily default charges (overdue days < 7)
           if (daysOverdue > 0) {
-            const baseAmount = Number(loan.amount) + Number(loan.total_interest);
+            const currentRolled = Number(loan.rolled_balance || 0);
+            const baseAmount = Number(loan.amount) + Number(loan.total_interest) + currentRolled;
             const feeAmount = baseAmount * (daysOverdue * 0.01);
             await loanService.applyLateFeeWithNotification(
               loan.id,
@@ -494,18 +493,51 @@ class JobsService {
     paymentReminders: JobResult;
     lateFees: JobResult;
     maturityProcessing: JobResult;
+    databaseKeepAlive: JobResult;
   }> {
-    const [paymentReminders, lateFees, maturityProcessing] = await Promise.all([
+    const [paymentReminders, lateFees, maturityProcessing, databaseKeepAlive] = await Promise.all([
       this.schedulePaymentReminders(),
       this.scheduleLateFeeApplication(),
       this.scheduleMaturityProcessing(),
+      this.scheduleDatabaseKeepAlive(),
     ]);
 
     return {
       paymentReminders,
       lateFees,
       maturityProcessing,
+      databaseKeepAlive,
     };
+  }
+
+  // Schedule Database Keep-Alive Job - Runs every 5 minutes to keep Supabase pooler connections warm and avoid cold starts
+  async scheduleDatabaseKeepAlive(): Promise<JobResult> {
+    try {
+      const jobId = `db_keep_alive_${Date.now()}`;
+
+      const response = await this.qstash.publish({
+        url: `${this.baseUrl}/health`,
+        method: "GET",
+        cron: "*/5 * * * *", // Every 5 minutes
+        headers: {
+          "X-Job-ID": jobId,
+          "X-Job-Type": "db_keep_alive",
+        },
+      });
+
+      return {
+        success: true,
+        message: "Database keep-alive job scheduled in QStash",
+        jobId,
+        details: response,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: "Failed to schedule database keep-alive job",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   // Check if daily fee already applied for a loan - Prevents duplicate fee application in same calendar day
