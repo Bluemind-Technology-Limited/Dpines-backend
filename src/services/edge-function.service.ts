@@ -12,11 +12,11 @@ export class EdgeFunctionService {
     try {
       const url = `${env.SUPABASE_URL}/functions/v1/${functionName}`;
       console.log(`[EDGE FUNCTION] Triggering ${functionName}...`);
-      const response = await fetch(url, {
+      const response = (await fetch(url, {
         method: "POST",
         headers: this.getHeaders(),
         body: JSON.stringify(payload),
-      });
+      })) as any;
 
       if (!response.ok) {
         console.error(`[EDGE FUNCTION ERROR] ${functionName} responded with status: ${response.status}`);
