@@ -27,9 +27,7 @@ export const env = {
   QSTASH_NEXT_SIGNING_KEY: process.env.QSTASH_NEXT_SIGNING_KEY || "",
   QSTASH_TOKEN: process.env.QSTASH_TOKEN || "",
 
-  // JWT
-  JWT_SECRET: process.env.JWT_SECRET || "your-secret-key",
-  JWT_EXPIRY: process.env.JWT_EXPIRY || "7d",
+
 
   // CORS
   CORS_ORIGIN: process.env.CORS_ORIGIN || "http://localhost:5173",
@@ -41,7 +39,6 @@ const requiredVars = [
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
-  "RESEND_API_KEY",
 ];
 
 if (process.env.NODE_ENV === "production") {
