@@ -19,7 +19,11 @@ export const errorHandler = (
   res: Response,
   _next: NextFunction
 ): void => {
-  console.error("Error:", err);
+  // Log only unexpected server errors (500) to keep console clean from expected client errors
+  const isClientError = (err instanceof AppError && err.statusCode < 500) || (err instanceof ZodError);
+  if (!isClientError) {
+    console.error("Unexpected Server Error:", err);
+  }
 
   if (err instanceof ZodError) {
     res.status(400).json({
