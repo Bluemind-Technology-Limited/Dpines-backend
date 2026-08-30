@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
-import { communicationsService } from "./communications.service";
-import { sendSuccess, asyncHandler } from "@/lib/utils";
+import { communicationsService } from "./communications.service.js";
+import { sendSuccess, asyncHandler } from "../../lib/utils.js";
 
 export const getTemplates = asyncHandler(async (_req: Request, res: Response) => {
   const templates = await communicationsService.getTemplates();

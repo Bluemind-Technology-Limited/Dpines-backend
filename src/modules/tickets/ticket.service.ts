@@ -1,6 +1,6 @@
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
-import type { Ticket } from "@/types";
+import prisma from "../../configs/database.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import type { Ticket } from "../../types/index.js";
 
 export class TicketService {
   async createTicket(

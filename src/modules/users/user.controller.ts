@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
-import { userService } from "./user.service";
-import { sendSuccess, sendPaginated, asyncHandler } from "@/lib/utils";
-import { AppError } from "@/middlewares/error.middleware";
-import { updateProfileSchema } from "@/lib/validators";
+import { userService } from "./user.service.js";
+import { sendSuccess, sendPaginated, asyncHandler } from "../../lib/utils.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import { updateProfileSchema } from "../../lib/validators.js";
 
 export const getProfile = asyncHandler(async (req: Request, res: Response) => {
   if (!req.user) {

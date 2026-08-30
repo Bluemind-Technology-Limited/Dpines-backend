@@ -7,8 +7,8 @@ import {
   updateAdvert,
   deleteAdvert,
   toggleAdvertActive,
-} from "./advert.controller";
-import { verifySupabaseToken, requireAuth, requireRole } from "@/middlewares/auth.middleware";
+} from "./advert.controller.js";
+import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
 const router: ExpressRouter = Router();
 

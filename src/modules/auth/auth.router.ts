@@ -6,8 +6,8 @@ import {
   updateProfile,
   changePassword,
   resetPassword,
-} from "./auth.controller";
-import { verifySupabaseToken, requireAuth } from "@/middlewares/auth.middleware";
+} from "./auth.controller.js";
+import { verifySupabaseToken, requireAuth } from "../../middlewares/auth.middleware.js";
 
 const router: ExpressRouter = Router();
 

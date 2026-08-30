@@ -8,8 +8,8 @@ import {
   updateTicketStatus,
   updateTicketPriority,
   closeTicket,
-} from "./ticket.controller";
-import { verifySupabaseToken, requireAuth, requireRole } from "@/middlewares/auth.middleware";
+} from "./ticket.controller.js";
+import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
 const router: Router = Router();
 

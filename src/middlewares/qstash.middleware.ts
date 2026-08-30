@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { Receiver } from "@upstash/qstash";
-import { env } from "@/configs/env";
-import { AppError } from "./error.middleware";
+import { env } from "../configs/env.js";
+import { AppError } from "./error.middleware.js";
 
 const receiver = new Receiver({
   currentSigningKey: env.QSTASH_CURRENT_SIGNING_KEY,

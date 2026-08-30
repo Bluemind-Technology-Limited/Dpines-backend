@@ -1,7 +1,7 @@
 // Audit Logging Service - Tracks all administrative actions and sensitive state changes - Captures: who, what, when, old_values → new_values for complete accountability - Required for regulatory compliance, dispute resolution, and security investigation
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../configs/database.js";
+import { AppError } from "../middlewares/error.middleware.js";
 
 type AuditAction =
   | "loan_approved"

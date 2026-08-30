@@ -1,6 +1,6 @@
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
-import notificationService from "@/modules/notifications/notification.service";
+import prisma from "../../configs/database.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import notificationService from "../notifications/notification.service.js";
 
 export class CommunicationsService {
   async getTemplates() {

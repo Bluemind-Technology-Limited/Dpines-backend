@@ -1,12 +1,12 @@
 import { Request, Response } from "express";
-import { ticketService } from "./ticket.service";
-import { sendSuccess, sendPaginated, asyncHandler } from "@/lib/utils";
-import { AppError } from "@/middlewares/error.middleware";
+import { ticketService } from "./ticket.service.js";
+import { sendSuccess, sendPaginated, asyncHandler } from "../../lib/utils.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 import {
   createTicketSchema,
   addTicketMessageSchema,
   updateTicketStatusSchema,
-} from "@/lib/validators";
+} from "../../lib/validators.js";
 
 export const createTicket = asyncHandler(async (req: Request, res: Response) => {
   if (!req.user) {

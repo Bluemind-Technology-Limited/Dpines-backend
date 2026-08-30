@@ -1,5 +1,5 @@
 import { Response } from "express";
-import { ApiResponse, PaginatedResponse } from "@/types/common";
+import { ApiResponse, PaginatedResponse } from "../types/common.js";
 
 export const keysToCamel = (obj: any): any => {
   if (obj === null || obj === undefined) return obj;

@@ -11,8 +11,8 @@ import {
   getInvestmentStats,
   completeInvestment,
   topUpInvestment,
-} from "./investment.controller";
-import { verifySupabaseToken, requireAuth, requireRole } from "@/middlewares/auth.middleware";
+} from "./investment.controller.js";
+import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
 const router: Router = Router();
 

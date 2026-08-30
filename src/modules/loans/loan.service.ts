@@ -1,18 +1,18 @@
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../../configs/database.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 import type {
   Loan,
   LoanPayment,
-} from "@/types";
+} from "../../types/index.js";
 import {
   calculateMonthlyPayment,
   calculateTotalInterest,
-} from "@/lib/utils";
-import { paymentService } from "@/services/payment.service";
-import { ledgerService } from "@/services/ledger.service";
-import { auditService } from "@/services/audit.service";
-import notificationService from "@/modules/notifications/notification.service";
-import { edgeFunctionService } from "@/services/edge-function.service";
+} from "../../lib/utils.js";
+import { paymentService } from "../../services/payment.service.js";
+import { ledgerService } from "../../services/ledger.service.js";
+import { auditService } from "../../services/audit.service.js";
+import notificationService from "../notifications/notification.service.js";
+import { edgeFunctionService } from "../../services/edge-function.service.js";
 
 export class LoanService {
   async createLoan(

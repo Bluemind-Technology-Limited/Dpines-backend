@@ -1,6 +1,6 @@
 import { Router } from "express";
-import * as communicationsController from "./communications.controller";
-import { authenticate, adminOnly } from "@/middlewares/auth.middleware";
+import * as communicationsController from "./communications.controller.js";
+import { authenticate, adminOnly } from "../../middlewares/auth.middleware.js";
 
 const router: Router = Router();
 

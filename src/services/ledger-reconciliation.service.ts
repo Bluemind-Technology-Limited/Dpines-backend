@@ -1,7 +1,7 @@
 // Ledger Reconciliation Service - Provides comprehensive deduction history tracking, reconciliation, and validation - Enables complete audit trail for all financial operations - Phase 7.2: Complete Ledger Tracking
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../configs/database.js";
+import { AppError } from "../middlewares/error.middleware.js";
 
 interface DeductionHistoryEntry {
   id: string;

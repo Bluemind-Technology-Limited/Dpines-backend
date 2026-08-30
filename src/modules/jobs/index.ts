@@ -1,1 +1,1 @@
-export { default as jobsRouter } from "./jobs.controller";
+export { default as jobsRouter } from "./jobs.controller.js";

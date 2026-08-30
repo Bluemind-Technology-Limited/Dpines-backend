@@ -1,4 +1,4 @@
-import type { LoanStatus, PaymentMethod, PaymentStatus } from "@/types";
+import type { LoanStatus, PaymentMethod, PaymentStatus } from "./index.js";
 
 export interface CreateLoanInput {
   userId: string;

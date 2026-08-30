@@ -9,8 +9,8 @@ import {
   updateUserRole,
   getUsersStats,
   createUserByAdmin,
-} from "./user.controller";
-import { verifySupabaseToken, requireAuth, requireRole } from "@/middlewares/auth.middleware";
+} from "./user.controller.js";
+import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
 const router: Router = Router();
 

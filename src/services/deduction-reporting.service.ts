@@ -1,7 +1,7 @@
 // Deduction Reporting Service - Financial reporting APIs, FIFO queue history tracking, and comprehensive analytics - Phase 7.2: Complete Ledger Tracking
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../configs/database.js";
+import { AppError } from "../middlewares/error.middleware.js";
 
 interface FifoQueueHistoryEntry {
   timestamp: Date;

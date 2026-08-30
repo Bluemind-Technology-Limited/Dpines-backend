@@ -1,8 +1,8 @@
-import prisma from "@/configs/database";
-import supabaseAdmin from "@/configs/supabase";
-import { edgeFunctionService } from "@/services/edge-function.service";
-import { AppError } from "@/middlewares/error.middleware";
-import type { UserRole } from "@/types";
+import prisma from "../../configs/database.js";
+import supabaseAdmin from "../../configs/supabase.js";
+import { edgeFunctionService } from "../../services/edge-function.service.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import type { UserRole } from "../../types/index.js";
 
 export class AuthService {
   async generateOTP(email: string): Promise<string> {

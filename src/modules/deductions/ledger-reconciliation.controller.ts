@@ -1,10 +1,10 @@
 // Ledger Reconciliation Controller - Batch deduction auditing, reconciliation, and validation endpoints - Phase 7.2: Complete Ledger Tracking
 
 import { Router, Request, Response } from "express";
-import { ledgerReconciliationService } from "@/services/ledger-reconciliation.service";
-import { asyncHandler } from "@/middlewares/async.middleware";
-import { authenticate, adminOnly } from "@/middlewares/auth.middleware";
-import { AppError } from "@/middlewares/error.middleware";
+import { ledgerReconciliationService } from "../../services/ledger-reconciliation.service.js";
+import { asyncHandler } from "../../middlewares/async.middleware.js";
+import { authenticate, adminOnly } from "../../middlewares/auth.middleware.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 
 const router: Router = Router();
 

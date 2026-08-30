@@ -1,4 +1,4 @@
-import type { InvestmentStatus, PayoutFrequency } from "@/types";
+import type { InvestmentStatus, PayoutFrequency } from "./index.js";
 
 export interface CreateInvestmentInput {
   userId: string;

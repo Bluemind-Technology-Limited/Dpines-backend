@@ -1,13 +1,13 @@
 import { Request, Response } from "express";
-import { investmentService } from "./investment.service";
-import { sendSuccess, sendPaginated, asyncHandler } from "@/lib/utils";
-import { AppError } from "@/middlewares/error.middleware";
+import { investmentService } from "./investment.service.js";
+import { sendSuccess, sendPaginated, asyncHandler } from "../../lib/utils.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 import {
   createInvestmentSchema,
   approveInvestmentSchema,
   rejectInvestmentSchema,
   setMaturityActionSchema,
-} from "@/lib/validators";
+} from "../../lib/validators.js";
 
 export const createInvestment = asyncHandler(
   async (req: Request, res: Response) => {

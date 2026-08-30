@@ -1,6 +1,6 @@
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
-import type { UserProfile, UserRole } from "@/types";
+import prisma from "../../configs/database.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import type { UserProfile, UserRole } from "../../types/index.js";
 
 export class UserService {
   async getUserById(userId: string): Promise<UserProfile | null> {
@@ -298,7 +298,7 @@ export class UserService {
   }
 }
 
-import supabaseAdmin from "@/configs/supabase";
-import { edgeFunctionService } from "@/services/edge-function.service";
+import supabaseAdmin from "../../configs/supabase.js";
+import { edgeFunctionService } from "../../services/edge-function.service.js";
 
 export const userService = new UserService();

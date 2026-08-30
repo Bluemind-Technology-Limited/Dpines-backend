@@ -1,9 +1,9 @@
 // Deduction Controller - Exposes admin deduction and direct operation endpoints
 
 import { Router, Request, Response } from "express";
-import deductionService from "./deduction.service";
-import { asyncHandler } from "@/middlewares/async.middleware";
-import { authenticate, adminOnly } from "@/middlewares/auth.middleware";
+import deductionService from "./deduction.service.js";
+import { asyncHandler } from "../../middlewares/async.middleware.js";
+import { authenticate, adminOnly } from "../../middlewares/auth.middleware.js";
 
 const router: Router = Router();
 

@@ -1,8 +1,8 @@
 import { Request, Response, Router } from "express";
-import { fifoDeductionValidator } from "@/services/deduction-validator.service";
-import { asyncHandler } from "@/middlewares/async.middleware";
-import { verifySupabaseToken } from "@/middlewares/auth.middleware";
-import { AppError } from "@/middlewares/error.middleware";
+import { fifoDeductionValidator } from "../../services/deduction-validator.service.js";
+import { asyncHandler } from "../../middlewares/async.middleware.js";
+import { verifySupabaseToken } from "../../middlewares/auth.middleware.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 
 const router: any = Router();
 

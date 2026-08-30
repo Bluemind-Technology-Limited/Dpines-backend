@@ -1,8 +1,8 @@
 import { Request, Response, Router, type Router as ExpressRouter } from "express";
-import { jobsService } from "@/services/jobs.service";
-import { asyncHandler } from "@/middlewares/async.middleware";
-import { authenticate, adminOnly } from "@/middlewares/auth.middleware";
-import { AppError } from "@/middlewares/error.middleware";
+import { jobsService } from "../../services/jobs.service.js";
+import { asyncHandler } from "../../middlewares/async.middleware.js";
+import { authenticate, adminOnly } from "../../middlewares/auth.middleware.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 
 const router: ExpressRouter = Router();
 

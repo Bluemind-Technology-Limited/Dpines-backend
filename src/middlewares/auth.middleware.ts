@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import supabaseAdmin from "@/configs/supabase";
-import { AppError } from "./error.middleware";
+import supabaseAdmin from "../configs/supabase.js";
+import { AppError } from "./error.middleware.js";
 
 declare global {
   namespace Express {

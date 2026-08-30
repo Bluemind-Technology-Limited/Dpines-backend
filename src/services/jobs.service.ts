@@ -1,11 +1,11 @@
 import { Client } from "@upstash/qstash";
-import { env } from "@/configs/env";
-import prisma from "@/configs/database";
-import { loanService } from "@/modules/loans/loan.service";
-import { investmentService } from "@/modules/investments/investment.service";
-import notificationService from "@/modules/notifications/notification.service";
-import emailService from "@/services/email.service";
-import { AppError } from "@/middlewares/error.middleware";
+import { env } from "../configs/env.js";
+import prisma from "../configs/database.js";
+import { loanService } from "../modules/loans/loan.service.js";
+import { investmentService } from "../modules/investments/investment.service.js";
+import notificationService from "../modules/notifications/notification.service.js";
+import emailService from "./email.service.js";
+import { AppError } from "../middlewares/error.middleware.js";
 
 interface JobResult {
   success: boolean;

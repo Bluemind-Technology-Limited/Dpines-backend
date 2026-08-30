@@ -1,7 +1,7 @@
 // FIFO Deduction Validation Service - Phase 7.1 - Enforces First-In-First-Out (FIFO) ordering for investment deductions - Purpose: - When an investor has multiple investments and one loan, the system ensures - deductions occur in the order investments were created (oldest first). - This prevents unfair targeting of specific investments and ensures fairness. - Rules: - 1. Oldest investments deducted first (start_date ascending) - 2. Cannot skip valid investments to deduct from newer ones - 3. Must have sufficient funds in the deduction source - 4. Cannot deduct from investments with withdrawn/cancelled status - 5. All deductions logged with FIFO queue position
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../configs/database.js";
+import { AppError } from "../middlewares/error.middleware.js";
 
 interface FifoQueueItem {
   position: number; // Queue order (1 = oldest/first)

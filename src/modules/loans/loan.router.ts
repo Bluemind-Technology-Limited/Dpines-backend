@@ -13,8 +13,8 @@ import {
   getLoanStats,
   getPendingPayments,
   getLoanPayments,
-} from "./loan.controller";
-import { verifySupabaseToken, requireAuth, requireRole } from "@/middlewares/auth.middleware";
+} from "./loan.controller.js";
+import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
 const router: Router = Router();
 

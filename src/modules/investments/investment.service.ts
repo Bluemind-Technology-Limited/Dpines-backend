@@ -1,15 +1,15 @@
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../../configs/database.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 import type {
   Investment,
   InvestmentStatus,
   PayoutFrequency,
-} from "@/types";
-import { calculateInvestmentCurrentValue, getMonthsBetweenDates } from "@/lib/utils";
-import { ledgerService } from "@/services/ledger.service";
-import { auditService } from "@/services/audit.service";
-import notificationService from "@/modules/notifications/notification.service";
-import { edgeFunctionService } from "@/services/edge-function.service";
+} from "../../types/index.js";
+import { calculateInvestmentCurrentValue, getMonthsBetweenDates } from "../../lib/utils.js";
+import { ledgerService } from "../../services/ledger.service.js";
+import { auditService } from "../../services/audit.service.js";
+import notificationService from "../notifications/notification.service.js";
+import { edgeFunctionService } from "../../services/edge-function.service.js";
 
 export class InvestmentService {
   async createInvestment(

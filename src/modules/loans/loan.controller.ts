@@ -1,14 +1,14 @@
 import { Request, Response } from "express";
-import { loanService } from "./loan.service";
-import { sendSuccess, sendPaginated, asyncHandler } from "@/lib/utils";
-import { AppError } from "@/middlewares/error.middleware";
+import { loanService } from "./loan.service.js";
+import { sendSuccess, sendPaginated, asyncHandler } from "../../lib/utils.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 import {
   createLoanSchema,
   approveLoanSchema,
   rejectLoanSchema,
   processDeductionSchema,
   loanPaymentSchema,
-} from "@/lib/validators";
+} from "../../lib/validators.js";
 
 export const createLoan = asyncHandler(async (req: Request, res: Response) => {
   if (!req.user) {

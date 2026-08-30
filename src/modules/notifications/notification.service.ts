@@ -1,8 +1,8 @@
 // Notification Service - Phase 5.1 - Comprehensive notification system for DPINES platform - Supports: - - Email notifications - - SMS notifications - - In-app notifications - - Notification preferences & history - - Bulk notification dispatching - Integration points: - - Loan payment reminders - - Investment maturity alerts - - Default/late fee notifications - - Administrative notifications - - System alerts
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
-import emailService from "@/services/email.service";
+import prisma from "../../configs/database.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import emailService from "../../services/email.service.js";
 
 type NotificationType = 
   | "loan_payment_reminder"

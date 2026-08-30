@@ -1,25 +1,25 @@
 import express, { Application, Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
-import { env } from "@/configs/env";
-import { errorHandler } from "@/middlewares/error.middleware";
+import { env } from "./configs/env.js";
+import { errorHandler } from "./middlewares/error.middleware.js";
 
 // Import routers
-import authRouter from "@/modules/auth/auth.router";
-import loanRouter from "@/modules/loans/loan.router";
-import investmentRouter from "@/modules/investments/investment.router";
-import ticketRouter from "@/modules/tickets/ticket.router";
-import advertRouter from "@/modules/adverts/advert.router";
-import userRouter from "@/modules/users/user.router";
-import deductionRouter from "@/modules/deductions/deduction.controller";
-import notificationRouter from "@/modules/notifications/notification.controller";
-import communicationsRouter from "@/modules/communications/communications.router";
-import { jobsRouter } from "@/modules/jobs";
+import authRouter from "./modules/auth/auth.router.js";
+import loanRouter from "./modules/loans/loan.router.js";
+import investmentRouter from "./modules/investments/investment.router.js";
+import ticketRouter from "./modules/tickets/ticket.router.js";
+import advertRouter from "./modules/adverts/advert.router.js";
+import userRouter from "./modules/users/user.router.js";
+import deductionRouter from "./modules/deductions/deduction.controller.js";
+import notificationRouter from "./modules/notifications/notification.controller.js";
+import communicationsRouter from "./modules/communications/communications.router.js";
+import { jobsRouter } from "./modules/jobs/index.js";
 import {
   fifoValidatorRouter,
   ledgerReconciliationRouter,
   financialReportingRouter,
-} from "@/modules/deductions";
+} from "./modules/deductions/index.js";
 
 const app: Application = express();
 
@@ -36,7 +36,7 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-import prisma from "@/configs/database";
+import prisma from "./configs/database.js";
 
 // Health check with Database Keep-Alive query
 app.get("/health", async (_req: Request, res: Response) => {
@@ -75,7 +75,7 @@ app.use((req: Request, res: Response) => {
 // Error Handler (must be last)
 app.use(errorHandler);
 
-import { loanService } from "@/modules/loans/loan.service";
+import { loanService } from "./modules/loans/loan.service.js";
 
 // Start server
 const PORT = env.PORT;

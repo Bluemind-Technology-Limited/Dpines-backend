@@ -1,7 +1,7 @@
 // Advanced Loan Payment Processing Service - Handles complex payment calculations including: - - Late fee calculations - - Payment allocation (interest → fees → principal) - - Partial payment rollover with compounded interest - - Marked payments tracking - - Next due date calculations - - Loan status management
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../configs/database.js";
+import { AppError } from "../middlewares/error.middleware.js";
 
 type LoanStatus = "pending" | "active" | "completed" | "overdue" | "rejected";
 

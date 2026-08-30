@@ -1,9 +1,9 @@
 // Admin Manual Deduction & Direct Operations Service - Handles admin-initiated deductions and direct financial operations - Operations: - 1. adminProcessDeduction - Pull investment funds into loan (investment→loan) - 2. adminApplyDirectCharge - Apply charges manually to loans - 3. adminDirectDeposit - Manual loan payment deposit - 4. adminDirectWithdrawal - Manual investment withdrawal - All operations require admin ID for accountability and are fully logged
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
-import { LedgerService } from "@/services/ledger.service";
-import { AuditService } from "@/services/audit.service";
+import prisma from "../../configs/database.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import { LedgerService } from "../../services/ledger.service.js";
+import { AuditService } from "../../services/audit.service.js";
 
 const ledgerService = new LedgerService();
 const auditService = new AuditService();

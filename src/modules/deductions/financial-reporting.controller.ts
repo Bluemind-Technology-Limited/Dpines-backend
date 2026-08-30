@@ -1,10 +1,10 @@
 // Financial Reporting Controller - Deduction reporting APIs, FIFO history tracking, and financial analytics - Phase 7.2: Complete Ledger Tracking
 
 import { Router, Request, Response } from "express";
-import { deductionReportingService } from "@/services/deduction-reporting.service";
-import { asyncHandler } from "@/middlewares/async.middleware";
-import { authenticate, adminOnly } from "@/middlewares/auth.middleware";
-import { AppError } from "@/middlewares/error.middleware";
+import { deductionReportingService } from "../../services/deduction-reporting.service.js";
+import { asyncHandler } from "../../middlewares/async.middleware.js";
+import { authenticate, adminOnly } from "../../middlewares/auth.middleware.js";
+import { AppError } from "../../middlewares/error.middleware.js";
 
 const router: Router = Router();
 

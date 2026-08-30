@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
-import { advertService } from "./advert.service";
-import { sendSuccess, sendPaginated, asyncHandler } from "@/lib/utils";
-import { AppError } from "@/middlewares/error.middleware";
-import { createAdvertSchema, updateAdvertSchema } from "@/lib/validators";
+import { advertService } from "./advert.service.js";
+import { sendSuccess, sendPaginated, asyncHandler } from "../../lib/utils.js";
+import { AppError } from "../../middlewares/error.middleware.js";
+import { createAdvertSchema, updateAdvertSchema } from "../../lib/validators.js";
 
 export const createAdvert = asyncHandler(async (req: Request, res: Response) => {
   const body = createAdvertSchema.parse(req.body);

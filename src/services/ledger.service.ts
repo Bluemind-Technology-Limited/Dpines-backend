@@ -1,7 +1,7 @@
 // Transaction Ledger Service - Comprehensive financial audit trail for all transactions - Tracks: deductions, deposits, interest, withdrawals, rollovers, charges - Every financial movement creates a ledger entry for compliance & audit
 
-import prisma from "@/configs/database";
-import { AppError } from "@/middlewares/error.middleware";
+import prisma from "../configs/database.js";
+import { AppError } from "../middlewares/error.middleware.js";
 
 type TransactionType = 
   | "deduction"      // Investment deduction for loan repayment

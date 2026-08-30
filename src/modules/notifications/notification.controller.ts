@@ -1,9 +1,9 @@
 // Notification Controller - Phase 5.1 - Exposes notification management endpoints
 
 import { Router, Request, Response } from "express";
-import notificationService from "./notification.service";
-import { asyncHandler } from "@/middlewares/async.middleware";
-import { authenticate } from "@/middlewares/auth.middleware";
+import notificationService from "./notification.service.js";
+import { asyncHandler } from "../../middlewares/async.middleware.js";
+import { authenticate } from "../../middlewares/auth.middleware.js";
 
 const router: Router = Router();
 

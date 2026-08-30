@@ -1,6 +1,6 @@
 packages:
   - '.'
 allowBuilds:
-  - '@prisma/engines'
-  - 'esbuild'
-  - 'prisma'
+  '0': '@prisma/engines'
+  '1': esbuild
+  '2': prisma
