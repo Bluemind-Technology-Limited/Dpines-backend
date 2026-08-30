@@ -38,6 +38,14 @@ app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 import prisma from "./configs/database.js";
 
+// Root check
+app.get("/", (_req: Request, res: Response) => {
+  res.json({
+    status: "ok",
+    message: "DPINES Nigeria API Server is running!"
+  });
+});
+
 // Health check with Database Keep-Alive query
 app.get("/health", async (_req: Request, res: Response) => {
   try {
