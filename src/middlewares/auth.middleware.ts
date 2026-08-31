@@ -48,6 +48,10 @@ export const verifySupabaseToken = async (
     const { data, error } = await supabaseAdmin.auth.getUser(token);
 
     if (error || !data.user) {
+      console.error(
+        `[AUTH] Token verification failed for ${req.method} ${req.path} (supabase=${process.env.SUPABASE_URL || "NOT SET"}):`,
+        error?.message || "no user returned"
+      );
       return next(new AppError(401, "Invalid or expired token"));
     }
 
@@ -90,6 +94,10 @@ export const verifySupabaseToken = async (
 
     next();
   } catch (error) {
+    console.error(
+      `[AUTH] Unexpected error verifying token for ${req.method} ${req.path} (supabase=${process.env.SUPABASE_URL || "NOT SET"}):`,
+      error
+    );
     if (error instanceof AppError) {
       return next(error);
     }
