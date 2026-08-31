@@ -595,7 +595,10 @@ export class NotificationService {
       
       console.log(`[NOTIFICATION] Calling send-loan-reminder edge function for loan ${params.loanId}`);
       
-      const response = await fetch(url, {
+      // Cast the fetch result: the global Response type resolves differently
+      // across @types/node/undici-types versions (breaks Vercel builds), so
+      // treat it as the edge-function response shape we rely on.
+      const response = (await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -610,7 +613,7 @@ export class NotificationService {
           monthly_payment: params.monthlyPayment,
           payment_date: params.paymentDate,
         }),
-      });
+      })) as unknown as { ok: boolean; json: () => Promise<any> };
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: "Unknown error" })) as any;
