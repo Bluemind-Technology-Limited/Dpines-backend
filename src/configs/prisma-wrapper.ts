@@ -1,10 +1,39 @@
-// Prisma Client Wrapper - Provides camelCase interface for snake_case database models - Automatically converts between camelCase code and snake_case database
+// Prisma Client Wrapper - Provides camelCase interface for snake_case database models
 
+import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
+import pg from "pg";
 
-const prismaClient = new PrismaClient();
+let prismaClient: any;
 
-// Create a wrapper with proper typing
+// Initialize Prisma with proper connection pooling (KIB-Apps pattern)
+if (process.env.DATABASE_URL) {
+  try {
+    const pool = new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 5,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    });
+
+    const adapter = new PrismaPg(pool);
+    prismaClient = new PrismaClient({
+      adapter: adapter as any,
+      log: [
+        { emit: 'stdout', level: 'warn' },
+        { emit: 'stdout', level: 'error' },
+      ],
+    } as any);
+  } catch (error) {
+    console.error("Failed to initialize Prisma with adapter:", error);
+    prismaClient = new PrismaClient();
+  }
+} else {
+  console.warn("DATABASE_URL not found, using default PrismaClient");
+  prismaClient = new PrismaClient();
+}
+
 type PrismaWrapper = typeof prismaClient;
 
 // Extend the prisma client to include mapped properties

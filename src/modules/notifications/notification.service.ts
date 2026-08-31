@@ -211,7 +211,7 @@ export class NotificationService {
         total,
         read,
         unread: total - read,
-        notifications: notifications.map((n) => ({
+        notifications: notifications.map((n: any) => ({
           id: n.id,
           userId: n.user_id,
           title: n.title,
@@ -577,6 +577,62 @@ export class NotificationService {
       }
     } catch (error) {
       console.error("Failed to send default fee notification:", error);
+    }
+  }
+
+  // Send loan reminder via dedicated edge function
+  async sendLoanReminderViaEdgeFunction(params: {
+    loanId: string;
+    paymentMonth: number;
+    userEmail: string;
+    userName: string;
+    loanAmount: number;
+    monthlyPayment: number;
+    paymentDate: string;
+  }): Promise<{ success: boolean; error?: string }> {
+    try {
+      const url = `${process.env.SUPABASE_URL}/functions/v1/send-loan-reminder`;
+      
+      console.log(`[NOTIFICATION] Calling send-loan-reminder edge function for loan ${params.loanId}`);
+      
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          loan_id: params.loanId,
+          payment_month: params.paymentMonth,
+          user_email: params.userEmail,
+          user_name: params.userName,
+          loan_amount: params.loanAmount,
+          monthly_payment: params.monthlyPayment,
+          payment_date: params.paymentDate,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: "Unknown error" })) as any;
+        console.error(`[NOTIFICATION ERROR] Edge function error:`, errorData);
+        return {
+          success: false,
+          error: errorData.error || "Failed to send reminder",
+        };
+      }
+
+      await response.json();
+      console.log(`[NOTIFICATION SUCCESS] Loan reminder sent to ${params.userEmail}`);
+      
+      return {
+        success: true,
+      };
+    } catch (err) {
+      console.error("[NOTIFICATION ERROR] Failed to call edge function:", err);
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : "Edge function call failed",
+      };
     }
   }
 }

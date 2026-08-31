@@ -2,10 +2,15 @@ import { z } from "zod";
 
 // Loan Validators
 export const createLoanSchema = z.object({
+  // userId: For admins only - specifies which user to create the loan for
+  // Regular users should NOT provide this - they apply for themselves
+  userId: z.string().uuid("Invalid user ID").optional(),
   amount: z.number().positive("Amount must be positive"),
   interestRate: z.number().min(0).max(100, "Interest rate must be between 0 and 100"),
   termMonths: z.number().int().min(1, "Term must be at least 1 month"),
   purpose: z.string().optional(),
+  monthlyPayment: z.number().positive("Monthly payment must be positive").optional(),
+  totalInterest: z.number().nonnegative("Total interest must be non-negative").optional(),
 });
 
 export const approveLoanSchema = z.object({
@@ -92,4 +97,36 @@ export const paginationSchema = z.object({
 export type CreateLoanInput = z.infer<typeof createLoanSchema>;
 export type CreateInvestmentInput = z.infer<typeof createInvestmentSchema>;
 export type CreateTicketInput = z.infer<typeof createTicketSchema>;
+
+export const updateLoanFinancialsSchema = z.object({
+  amount: z.number().positive(),
+  principal_balance: z.number().nonnegative(),
+  interest_rate: z.number().nonnegative(),
+  start_date: z.string().or(z.date()),
+  term_months: z.number().int().positive().optional(),
+  end_date: z.string().or(z.date()).nullable().optional(),
+  status: z.string().optional(),
+  monthly_payment: z.number().nonnegative().optional(),
+  rolled_balance: z.number().nonnegative().optional(),
+  compounded_interest: z.number().nonnegative().optional(),
+});
+
+export const updateInvestmentFinancialsSchema = z.object({
+  amount: z.number().positive(),
+  current_value: z.number().nonnegative(),
+  interest_rate: z.number().nonnegative(),
+  start_date: z.string().or(z.date()),
+  term_months: z.number().int().positive().optional(),
+  end_date: z.string().or(z.date()).nullable().optional(),
+  status: z.string().optional(),
+});
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
+
+export const sendLoanReminderSchema = z.object({
+  paymentMonth: z.number().int().positive(),
+  userEmail: z.string().optional().or(z.literal("")),
+  userName: z.string().optional().or(z.literal("")),
+  loanAmount: z.number().positive(),
+  monthlyPayment: z.number().positive(),
+  paymentDate: z.string(),
+});

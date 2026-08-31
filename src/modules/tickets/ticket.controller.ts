@@ -84,7 +84,7 @@ export const addMessage = asyncHandler(async (req: Request, res: Response) => {
   const body = addTicketMessageSchema.parse(req.body);
 
   // Check if user is admin for isAdminReply flag
-  const user = await (await import("@/configs/database")).default.userProfile.findUnique({
+  const user = await (await import("../../configs/database.js")).default.userProfile.findUnique({
     where: { id: req.user.sub },
   });
 

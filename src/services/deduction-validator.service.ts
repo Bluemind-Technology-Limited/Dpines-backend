@@ -279,7 +279,7 @@ class FifoDeductionValidator {
         );
       }
 
-      const deductionService = require("@/modules/deductions/deduction.service").default;
+      const deductionService = require("../modules/deductions/deduction.service.js").default;
       const deductionsApplied: Array<{
         investmentId: string;
         amount: number;

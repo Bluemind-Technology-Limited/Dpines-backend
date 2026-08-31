@@ -7,6 +7,7 @@ import {
   approveInvestmentSchema,
   rejectInvestmentSchema,
   setMaturityActionSchema,
+  updateInvestmentFinancialsSchema,
 } from "../../lib/validators.js";
 
 export const createInvestment = asyncHandler(
@@ -177,5 +178,22 @@ export const topUpInvestment = asyncHandler(
     );
 
     sendSuccess(res, investment, "Investment topped up successfully");
+  }
+);
+
+export const updateInvestmentFinancialsController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { investmentId } = req.params;
+    const body = updateInvestmentFinancialsSchema.parse(req.body);
+    const result = await investmentService.updateInvestmentFinancials(investmentId, body);
+    sendSuccess(res, result, "Investment financials updated successfully");
+  }
+);
+
+export const deleteInvestmentController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { investmentId } = req.params;
+    const result = await investmentService.deleteInvestment(investmentId);
+    sendSuccess(res, result, "Investment deleted successfully");
   }
 );

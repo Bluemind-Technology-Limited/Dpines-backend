@@ -5,6 +5,7 @@ import { ledgerReconciliationService } from "../../services/ledger-reconciliatio
 import { asyncHandler } from "../../middlewares/async.middleware.js";
 import { authenticate, adminOnly } from "../../middlewares/auth.middleware.js";
 import { AppError } from "../../middlewares/error.middleware.js";
+import prisma from "../../configs/prisma-wrapper.js";
 
 const router: Router = Router();
 
@@ -12,14 +13,27 @@ const router: Router = Router();
 router.get(
   "/ledger/history/:loanId",
   authenticate,
-  adminOnly,
   asyncHandler(async (req: Request, res: Response) => {
     const { loanId } = req.params;
+    const userId = (req as any).user?.sub;
+    const userRole = (req as any).user?.role?.toLowerCase() || "user";
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
     const offset = parseInt(req.query.offset as string) || 0;
 
     if (!loanId) {
       throw new AppError(400, "Missing required parameter: loanId");
+    }
+
+    // Admin can view any loan's history, regular users can only view their own
+    if (!["admin", "loans_admin"].includes(userRole)) {
+      const loan = await prisma.loan.findUnique({
+        where: { id: loanId },
+        select: { user_id: true },
+      });
+      
+      if (!loan || loan.user_id !== userId) {
+        throw new AppError(403, "You do not have permission to view this loan's deduction history");
+      }
     }
 
     const result = await ledgerReconciliationService.getDeductionHistory(
@@ -62,11 +76,12 @@ router.get(
   })
 );
 
-// GET /api/deductions/ledger/user-history/:userId - Get all deductions for a user across all loans and investments - Query params: - - limit: number (default 100, max 500) - - offset: number (default 0) - Response: - { - success: true, - data: { - deductions: DeductionHistoryEntry[], - total: number, - loansImpacted: string[], - investmentsImpacted: string[], - totalDeducted: number - } - }
+// GET /api/deductions/ledger/user-history/:userId - Get the full transaction
+// ledger for a user (deposits, deductions, interest, rollovers, charges). Admins
+// can view any user; a regular user can only view their own history.
 router.get(
   "/ledger/user-history/:userId",
   authenticate,
-  adminOnly,
   asyncHandler(async (req: Request, res: Response) => {
     const { userId } = req.params;
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
@@ -76,16 +91,27 @@ router.get(
       throw new AppError(400, "Missing required parameter: userId");
     }
 
-    const result = await ledgerReconciliationService.getUserDeductionHistory(
-      userId,
-      limit,
-      offset
-    );
+    const userRole = (req as any).user?.role?.toLowerCase() || "user";
+    const requesterId = (req as any).user?.sub;
+    const isAdmin = ["admin", "invest_admin", "loans_admin", "support"].includes(userRole);
+    if (!isAdmin && requesterId !== userId) {
+      throw new AppError(403, "You can only view your own transaction history");
+    }
+
+    const [transactions, total] = await Promise.all([
+      prisma.transactionLedger.findMany({
+        where: { user_id: userId },
+        orderBy: { created_at: "desc" },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.transactionLedger.count({ where: { user_id: userId } }),
+    ]);
 
     res.status(200).json({
       success: true,
-      message: "User deduction history retrieved",
-      data: result,
+      message: "User transaction history retrieved",
+      data: { transactions, total },
     });
   })
 );

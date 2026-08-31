@@ -148,7 +148,7 @@ export class DeductionReportingService {
 
       // Calculate summary
       const amounts = deductions.map((d: any) => Number(d.amount));
-      const totalDeductions = amounts.reduce((a, b) => a + b, 0);
+      const totalDeductions = amounts.reduce((a: number, b: number) => a + b, 0);
       const averageDeduction = totalDeductions / amounts.length;
 
       // Group by investment
@@ -343,7 +343,7 @@ export class DeductionReportingService {
         },
       });
 
-      const totalDeducted = allDeductions.reduce((sum, d: any) => sum + d.amount, 0);
+      const totalDeducted = allDeductions.reduce((sum: number, d: any) => sum + d.amount, 0);
       const remainingInvestments = investments.length;
 
       // Calculate deduction pace
@@ -376,7 +376,7 @@ export class DeductionReportingService {
 
       // Project completion date if deduction pace continues
       const remainingInvestmentValue = investments.reduce(
-        (sum, inv: any) => sum + Number(inv.current_value || 0),
+        (sum: number, inv: any) => sum + Number(inv.current_value || 0),
         0
       );
       let projectedCompletion: Date | undefined;
@@ -638,7 +638,7 @@ export class DeductionReportingService {
       });
 
       const totalDeducted = filteredDeductions.reduce(
-        (sum, d: any) => sum + Number(d.amount),
+        (sum: number, d: any) => sum + Number(d.amount),
         0
       );
       const remainingValue = Math.max(

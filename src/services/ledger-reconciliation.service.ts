@@ -391,12 +391,12 @@ export class LedgerReconciliationService {
               const metadata = d.metadata as any;
               return metadata?.investmentId;
             })
-            .filter(Boolean)
+            .filter(Boolean) as string[]
         ),
       ];
 
       const totalDeductions = deductions.reduce(
-        (sum, d: any) => sum + Number(d.amount),
+        (sum: number, d: any) => sum + Number(d.amount),
         0
       );
 
@@ -462,7 +462,7 @@ export class LedgerReconciliationService {
       }
 
       const amounts = deductions.map((d: any) => Number(d.amount));
-      const totalDeducted = amounts.reduce((a, b) => a + b, 0);
+      const totalDeducted = amounts.reduce((a: number, b: number) => a + b, 0);
       const investmentIds = [
         ...new Set(
           deductions
@@ -470,7 +470,7 @@ export class LedgerReconciliationService {
               const metadata = d.metadata as any;
               return metadata?.investmentId;
             })
-            .filter(Boolean)
+            .filter(Boolean) as string[]
         ),
       ];
 

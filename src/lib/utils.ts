@@ -76,10 +76,10 @@ export const sendError = (
 
 export const calculateMonthlyPayment = (
   principal: number,
-  annualRate: number,
+  monthlyRatePercent: number,
   termMonths: number
 ): number => {
-  const monthlyRate = annualRate / 100 / 12;
+  const monthlyRate = monthlyRatePercent / 100;
   if (monthlyRate === 0) {
     return principal / termMonths;
   }
@@ -99,11 +99,11 @@ export const calculateTotalInterest = (
 
 export const calculateInvestmentCurrentValue = (
   principal: number,
-  annualRate: number,
+  monthlyRatePercent: number,
   monthsElapsed: number,
   frequency: string
 ): number => {
-  const monthlyRate = annualRate / 100 / 12;
+  const monthlyRate = monthlyRatePercent / 100;
 
   if (frequency === "reinvestment") {
     // Compound interest monthly

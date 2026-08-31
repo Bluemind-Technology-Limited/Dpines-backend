@@ -11,6 +11,8 @@ import {
   getInvestmentStats,
   completeInvestment,
   topUpInvestment,
+  updateInvestmentFinancialsController,
+  deleteInvestmentController,
 } from "./investment.controller.js";
 import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
@@ -47,6 +49,18 @@ router.post(
   "/:investmentId/complete",
   requireRole(["admin", "invest_admin"]),
   completeInvestment
+);
+
+router.put(
+  "/:investmentId/financials",
+  requireRole(["admin", "invest_admin"]),
+  updateInvestmentFinancialsController
+);
+
+router.delete(
+  "/:investmentId",
+  requireRole(["admin", "invest_admin"]),
+  deleteInvestmentController
 );
 
 export default router;

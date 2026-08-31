@@ -384,21 +384,21 @@ export class InvestmentService {
         where: { user_id: userId },
       });
 
-      const totalInvested = investments.reduce((sum, i) => sum + Number(i.amount), 0);
+      const totalInvested = investments.reduce((sum: number, i: any) => sum + Number(i.amount), 0);
       const totalCurrentValue = investments.reduce(
-        (sum, i) => sum + Number(i.current_value),
+        (sum: number, i: any) => sum + Number(i.current_value),
         0
       );
       const totalEarnings = totalCurrentValue - totalInvested;
       const activeInvestments = investments.filter(
-        (i) => i.status === "active"
+        (i: any) => i.status === "active"
       ).length;
       const completedInvestments = investments.filter(
-        (i) => i.status === "completed"
+        (i: any) => i.status === "completed"
       ).length;
       const averageInterestRate =
         investments.length > 0
-          ? investments.reduce((sum, i) => sum + Number(i.interest_rate), 0) /
+          ? investments.reduce((sum: number, i: any) => sum + Number(i.interest_rate), 0) /
             investments.length
           : 0;
 
@@ -639,11 +639,10 @@ export class InvestmentService {
   // Helper: Calculate compound balance - Used for both interest accrual and payout calculations
   private calculateCompoundBalance(
     principal: number,
-    annualInterestRate: number,
+    monthlyInterestRate: number,
     monthsElapsed: number
   ): number {
-    // Convert annual rate to monthly rate
-    const monthlyRate = annualInterestRate / 100 / 12;
+    const monthlyRate = monthlyInterestRate / 100;
 
     // Compound interest formula: A = P(1 + r)^n
     const balance = principal * Math.pow(1 + monthlyRate, monthsElapsed);
@@ -1213,6 +1212,54 @@ export class InvestmentService {
       if (error instanceof AppError) throw error;
       throw new AppError(500, "Failed to set maturity action");
     }
+  }
+
+  async updateInvestmentFinancials(investmentId: string, updates: any) {
+    const investment = await prisma.investment.findUnique({
+      where: { id: investmentId },
+    });
+
+    if (!investment) {
+      throw new AppError(404, "Investment not found");
+    }
+
+    const updatedData: any = {};
+    if (updates.amount !== undefined) updatedData.amount = updates.amount;
+    if (updates.current_value !== undefined) updatedData.current_value = updates.current_value;
+    if (updates.interest_rate !== undefined) updatedData.interest_rate = updates.interest_rate;
+    if (updates.start_date !== undefined) updatedData.start_date = new Date(updates.start_date);
+    if (updates.term_months !== undefined) updatedData.term_months = updates.term_months;
+    if (updates.end_date !== undefined) updatedData.end_date = updates.end_date ? new Date(updates.end_date) : null;
+    if (updates.status !== undefined && updates.status !== "") updatedData.status = updates.status;
+
+    const result = await prisma.investment.update({
+      where: { id: investmentId },
+      data: updatedData,
+    });
+
+    return result;
+  }
+
+  // Admin: Delete an investment (and its related transaction-ledger entries)
+  async deleteInvestment(investmentId: string) {
+    const investment = await prisma.investment.findUnique({
+      where: { id: investmentId },
+    });
+
+    if (!investment) {
+      throw new AppError(404, "Investment not found");
+    }
+
+    // Clean up ledger references so they don't dangle after deletion
+    await prisma.transactionLedger.deleteMany({
+      where: { source_id: investmentId },
+    });
+
+    await prisma.investment.delete({
+      where: { id: investmentId },
+    });
+
+    return { id: investmentId };
   }
 }
 

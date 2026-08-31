@@ -89,14 +89,24 @@ export class EmailService {
       });
 
       if (!response) {
-        console.error(`Failed to send email to ${to} via Edge Function`);
+        const errorMsg = `Failed to send email to ${to} via Edge Function (null response)`;
+        console.error(`[EMAIL ERROR] ${errorMsg}`);
         return {
           success: false,
-          error: "Edge function execution failed",
+          error: errorMsg,
         };
       }
 
-      console.log(`✓ Email sent to ${to} via Edge Function`);
+      if (response.error) {
+        const errorMsg = `Edge function error: ${response.error}`;
+        console.error(`[EMAIL ERROR] ${errorMsg}`);
+        return {
+          success: false,
+          error: errorMsg,
+        };
+      }
+
+      console.log(`✓ Email sent successfully to ${to}`);
 
       return {
         success: true,

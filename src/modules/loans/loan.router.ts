@@ -12,7 +12,11 @@ import {
   processDeduction,
   getLoanStats,
   getPendingPayments,
+  getRepaymentRequests,
   getLoanPayments,
+  deleteLoanController,
+  updateLoanFinancialsController,
+  sendLoanReminderController,
 } from "./loan.controller.js";
 import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
@@ -26,7 +30,8 @@ router.use(requireAuth);
 router.post("/", createLoan);
 router.get("/user/stats", getLoanStats);
 router.get("/user/my-loans", getUserLoans);
-router.get("/payments/pending", requireRole(["admin", "loans_admin"]), getPendingPayments);
+router.get("/payments/pending", getPendingPayments);
+router.get("/requests", getRepaymentRequests);
 router.get("/:loanId/payments", getLoanPayments);
 router.get("/:loanId", getLoanById);
 
@@ -53,6 +58,24 @@ router.post(
   "/:loanId/deduct",
   requireRole(["admin", "loans_admin"]),
   processDeduction
+);
+
+router.delete(
+  "/:loanId",
+  requireRole(["admin", "loans_admin"]),
+  deleteLoanController
+);
+
+router.put(
+  "/:loanId/financials",
+  requireRole(["admin", "loans_admin"]),
+  updateLoanFinancialsController
+);
+
+router.post(
+  "/:loanId/reminder",
+  requireRole(["admin", "loans_admin"]),
+  sendLoanReminderController
 );
 
 export default router;

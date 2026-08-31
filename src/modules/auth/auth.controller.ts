@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { authService } from "./auth.service.js";
 import { sendSuccess, asyncHandler } from "../../lib/utils.js";
 import { AppError } from "../../middlewares/error.middleware.js";
+import { edgeFunctionService } from "../../services/edge-function.service.js";
 import { z } from "zod";
 
 const generateOTPSchema = z.object({
@@ -34,10 +35,15 @@ const resetPasswordSchema = z.object({
 export const generateOTP = asyncHandler(async (req: Request, res: Response) => {
   const body = generateOTPSchema.parse(req.body);
 
-  const otp = await authService.generateOTP(body.email);
+  // Call the send-otp Edge Function (generates OTP in DB and sends the email)
+  const result = await edgeFunctionService.callFunction("send-otp", {
+    email: body.email,
+    type: "password_reset",
+  });
 
-  // In production, send OTP via email
-  console.log(`OTP for ${body.email}: ${otp}`);
+  if (!result) {
+    throw new AppError(500, "Failed to send OTP email via Edge Function");
+  }
 
   sendSuccess(res, { message: "OTP sent to your email" }, "OTP generated successfully");
 });

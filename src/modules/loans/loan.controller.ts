@@ -8,7 +8,11 @@ import {
   rejectLoanSchema,
   processDeductionSchema,
   loanPaymentSchema,
+  updateLoanFinancialsSchema,
+  sendLoanReminderSchema,
 } from "../../lib/validators.js";
+import notificationService from "../notifications/notification.service.js";
+import prisma from "../../configs/prisma-wrapper.js";
 
 export const createLoan = asyncHandler(async (req: Request, res: Response) => {
   if (!req.user) {
@@ -16,13 +20,56 @@ export const createLoan = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const body = createLoanSchema.parse(req.body);
+  const userRole = (req.user as any).role?.toLowerCase() || "user";
+  const isAdmin = ["admin", "loans_admin"].includes(userRole);
+
+  // RIGID BUSINESS LOGIC:
+  // 1. Regular users can only create loans for themselves
+  // 2. Admins MUST provide userId in the request body
+  // 3. Admins cannot create loans for themselves
+
+  let borrowerId: string;
+
+  if (isAdmin) {
+    // Admin must explicitly provide userId
+    if (!body.userId) {
+      throw new AppError(400, "Admins must specify which user to create the loan for via userId parameter");
+    }
+    
+    borrowerId = body.userId;
+
+    // Prevent admin from creating loan for themselves
+    if (borrowerId === req.user.sub) {
+      throw new AppError(400, "Admins cannot create loans for themselves. Use the regular loan application form if you need a personal loan.");
+    }
+  } else {
+    // Regular user - can only apply for themselves
+    if (body.userId && body.userId !== req.user.sub) {
+      throw new AppError(403, "You can only create loans for yourself");
+    }
+    borrowerId = req.user.sub;
+  }
+
+  // Verify the borrower exists
+  const borrower = await prisma.userProfile.findUnique({
+    where: { id: borrowerId },
+  });
+
+  if (!borrower) {
+    throw new AppError(404, `User with ID ${borrowerId} not found`);
+  }
+
+  console.log(`[LOAN CREATE] ${isAdmin ? "Admin" : "User"} ${req.user.sub} creating loan for ${borrowerId} (${borrower.email})`);
 
   const loan = await loanService.createLoan(
-    req.user.sub,
+    borrowerId,
     body.amount,
     body.interestRate,
     body.termMonths,
-    body.purpose
+    body.purpose,
+    body.monthlyPayment,
+    body.totalInterest
+    // isAdmin ? req.user.sub : undefined  // Track who created the loan (TODO: uncomment when database is migrated)
   );
 
   sendSuccess(res, loan, "Loan created successfully", 201);
@@ -46,6 +93,8 @@ export const getUserLoans = asyncHandler(
       throw new AppError(401, "Unauthorized");
     }
 
+    console.log(`[GET USER LOANS] User ${req.user.sub} requesting their loans`);
+
     const { status } = req.query;
 
     const loans = await loanService.getUserLoans(
@@ -53,6 +102,7 @@ export const getUserLoans = asyncHandler(
       status as any
     );
 
+    console.log(`[GET USER LOANS RESPONSE] Sending ${loans.length} loans to user ${req.user.sub}`);
     sendSuccess(res, loans, "User loans fetched successfully");
   }
 );
@@ -180,9 +230,42 @@ export const getLoanStats = asyncHandler(
 );
 
 export const getPendingPayments = asyncHandler(
-  async (_req: Request, res: Response) => {
-    const payments = await loanService.getPendingPayments();
+  async (req: Request, res: Response) => {
+    const userRole = (req.user as any).role?.toLowerCase() || "user";
+    const userId = (req.user as any).sub;
+    
+    // Admins get all pending payments, regular users get only their own
+    const payments = ["admin", "loans_admin"].includes(userRole)
+      ? await loanService.getPendingPayments()
+      : await loanService.getUserPendingPayments(userId);
+    
     sendSuccess(res, payments, "Pending payments fetched successfully");
+  }
+);
+
+export const getRepaymentRequests = asyncHandler(
+  async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new AppError(401, "Unauthorized");
+    }
+
+    const { loanId } = req.query;
+    const userRole = (req.user as any).role?.toLowerCase() || "user";
+    const userId = (req.user as any).sub;
+
+    // Admins can see all requests, users see only their own or for their loans
+    const requests = await loanService.getRepaymentRequests(
+      loanId as string | undefined,
+      ["admin", "loans_admin"].includes(userRole) ? undefined : userId
+    );
+
+    console.log(`\n========== REPAYMENT REQUESTS API RESPONSE ==========`);
+    console.log(`Total requests: ${requests.length}`);
+    if (requests.length > 0) {
+      console.log(`First request structure:`, JSON.stringify(requests[0], null, 2));
+    }
+    console.log(`====================================================\n`);
+    sendSuccess(res, requests, "Repayment requests fetched successfully");
   }
 );
 
@@ -191,5 +274,85 @@ export const getLoanPayments = asyncHandler(
     const { loanId } = req.params;
     const payments = await loanService.getLoanPayments(loanId);
     sendSuccess(res, payments, "Loan payments fetched successfully");
+  }
+);
+
+export const deleteLoanController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { loanId } = req.params;
+    const result = await loanService.deleteLoan(loanId);
+    sendSuccess(res, result, "Loan deleted successfully");
+  }
+);
+
+export const updateLoanFinancialsController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { loanId } = req.params;
+    const body = updateLoanFinancialsSchema.parse(req.body);
+    const result = await loanService.updateLoanFinancials(loanId, body);
+    sendSuccess(res, result, "Loan financials updated successfully");
+  }
+);
+
+export const sendLoanReminderController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { loanId } = req.params;
+    const body = sendLoanReminderSchema.parse(req.body);
+
+    const loan = await loanService.getLoanById(loanId);
+    if (!loan) {
+      throw new AppError(404, "Loan not found");
+    }
+
+    // Fetch the actual borrower (loan owner) from user_profiles using the loan's user_id
+    const borrower = await prisma.userProfile.findUnique({
+      where: { id: (loan as any).user_id },
+    });
+
+    if (!borrower) {
+      throw new AppError(404, "Borrower not found");
+    }
+
+    const borrowerEmail = borrower.email;
+    const borrowerName = `${borrower.first_name || ""} ${borrower.last_name || ""}`.trim();
+
+    console.log(`[REMINDER DEBUG] Borrower fetched by user_id: ${(loan as any).user_id}`);
+    console.log(`[REMINDER DEBUG] Borrower email: ${borrowerEmail}, name: ${borrowerName}`);
+
+    if (!borrowerEmail) {
+      throw new AppError(400, "Borrower email not found");
+    }
+
+    // Send via edge function - send to BORROWER, not admin
+    const reminderResult = await notificationService.sendLoanReminderViaEdgeFunction({
+      loanId: loan.id,
+      paymentMonth: body.paymentMonth,
+      userEmail: borrowerEmail,
+      userName: borrowerName,
+      loanAmount: Number(loan.amount),
+      monthlyPayment: body.monthlyPayment,
+      paymentDate: body.paymentDate,
+    });
+
+    if (!reminderResult.success) {
+      throw new AppError(500, reminderResult.error || "Failed to send reminder");
+    }
+
+    // Create in-app notification for the borrower
+    await notificationService.createNotification({
+      userId: (loan as any).user_id,
+      title: "Loan Payment Reminder",
+      message: `Your loan payment reminder for Month ${body.paymentMonth} (₦${body.monthlyPayment.toLocaleString()}) has been sent.`,
+      type: "loan_payment_reminder",
+      channels: ["in_app"],
+      metadata: {
+        loanId,
+        paymentMonth: body.paymentMonth,
+        amountDue: body.monthlyPayment,
+        dueDate: body.paymentDate,
+      },
+    });
+
+    sendSuccess(res, reminderResult, "Reminder sent successfully");
   }
 );

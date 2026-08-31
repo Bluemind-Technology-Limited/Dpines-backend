@@ -119,12 +119,12 @@ export class UserService {
         where: { user_id: userId },
       });
 
-      const activeLoan = loans.find((l) => l.status === "active");
-      const totalBorrowed = loans.reduce((sum, l) => sum + Number(l.amount), 0);
-      const totalPaid = loans.reduce((sum, l) => sum + Number(l.amount_paid), 0);
-      const totalInvested = investments.reduce((sum, i) => sum + Number(i.amount), 0);
+      const activeLoan = loans.find((l: any) => l.status === "active");
+      const totalBorrowed = loans.reduce((sum: number, l: any) => sum + Number(l.amount), 0);
+      const totalPaid = loans.reduce((sum: number, l: any) => sum + Number(l.amount_paid), 0);
+      const totalInvested = investments.reduce((sum: number, i: any) => sum + Number(i.amount), 0);
       const totalCurrentValue = investments.reduce(
-        (sum, i) => sum + Number(i.current_value),
+        (sum: number, i: any) => sum + Number(i.current_value),
         0
       );
 
@@ -134,8 +134,8 @@ export class UserService {
           activeLoan: activeLoan || null,
           totalBorrowed,
           totalPaid,
-          pendingLoans: loans.filter((l) => l.status === "pending").length,
-          completedLoans: loans.filter((l) => l.status === "completed").length,
+          pendingLoans: loans.filter((l: any) => l.status === "pending").length,
+          completedLoans: loans.filter((l: any) => l.status === "completed").length,
         },
         investments: {
           totalInvestments: investments.length,
@@ -143,7 +143,7 @@ export class UserService {
           totalCurrentValue,
           totalEarnings: totalCurrentValue - totalInvested,
           activeInvestments: investments.filter(
-            (i) => i.status === "active"
+            (i: any) => i.status === "active"
           ).length,
         },
         recentLoans: loans.slice(0, 5),

@@ -53,7 +53,7 @@ export class PaymentService {
       if (paymentAmount < monthlyInterest) {
         throw new AppError(
           400,
-          "Payment must be at least equal to monthly interest"
+          `Payment must be at least equal to the monthly interest (₦${Math.round(Number(monthlyInterest))})`
         );
       }
 
@@ -61,21 +61,20 @@ export class PaymentService {
       const principalDue = totalDue - monthlyInterest;
       const rolledBalance = principalDue - Math.max(0, paymentAmount - monthlyInterest);
 
-      // Calculate compounded interest on rolled balance
-      // monthly_rate = annual_rate / 100 / 12
-      const monthlyRate = (loan as any).interestRate / 100 / 12;
+      // monthly_rate = monthly_rate_percent / 100 (Prisma returns snake_case)
+      const monthlyRate = Number((loan as any).interest_rate) / 100;
       const compoundedInterest = rolledBalance * monthlyRate;
 
       // Update loan for rollover
-      const currentRolloverCount = (loan as any).rolloverCount || 0;
+      const currentRolloverCount = (loan as any).rollover_count || 0;
       const newRolloverCount = currentRolloverCount + 1;
       const termExtension = 1; // Extend by 1 month for each partial payment
 
       await prisma.loan.update({
         where: { id: loanId },
         data: {
-          rolled_balance: rolledBalance,
-          compounded_interest: ((loan as any).compounded_interest || 0) + compoundedInterest,
+          rolled_balance: Number(rolledBalance),
+          compounded_interest: Number((loan as any).compounded_interest || 0) + compoundedInterest,
           term_months: (loan as any).term_months + termExtension,
           last_rollover_date: new Date(),
           rollover_count: newRolloverCount,
@@ -151,9 +150,9 @@ export class PaymentService {
     };
   }
 
-  // Calculate monthly interest from principal and annual rate
-  calculateMonthlyInterest(principal: number, annualRate: number): number {
-    const monthlyRate = annualRate / 100 / 12;
+  // Calculate monthly interest from principal and monthly rate
+  calculateMonthlyInterest(principal: number, interestRate: number): number {
+    const monthlyRate = interestRate / 100;
     return principal * monthlyRate;
   }
 
@@ -166,10 +165,14 @@ export class PaymentService {
     // Mark current payment as processed
     const allMarked = [...markedPayments, paymentMonth];
 
+    // Schedule is based on the loan start date (fall back to created_at for
+    // legacy loans approved before start_date tracking existed).
+    const baseDate = (loan as any).start_date ?? (loan as any).created_at;
+
     // Find next unmarked month
-    for (let month = paymentMonth + 1; month <= (loan as any).termMonths; month++) {
+    for (let month = paymentMonth + 1; month <= (loan as any).term_months; month++) {
       if (!allMarked.includes(month)) {
-        const nextDueDate = new Date((loan as any).startDate);
+        const nextDueDate = new Date(baseDate);
         nextDueDate.setMonth(nextDueDate.getMonth() + month);
         nextDueDate.setDate(1); // First day of month
         return nextDueDate;
@@ -197,22 +200,32 @@ export class PaymentService {
         throw new AppError(404, "Loan not found");
       }
 
-      if ((loan as any).status !== "active") {
-        throw new AppError(400, "Loan is not active");
+      // Loans that are overdue still need to receive payments — only block loans
+      // that genuinely can't be paid (pending/unapproved, rejected, completed).
+      if (!["active", "overdue"].includes((loan as any).status)) {
+        const reason = (loan as any).status === "completed"
+          ? "Loan has already been completed - no further payments can be approved"
+          : `Loan cannot receive payments (current status: ${(loan as any).status})`;
+        throw new AppError(400, reason);
       }
 
-      if (!(loan as any).startDate) {
-        throw new AppError(400, "Loan has not been approved");
+      // A loan must have a start date to compute its payment schedule. Loans
+      // approved through older paths may be active with a null start_date —
+      // fall back to created_at so payments can still be approved (the missing
+      // start_date is healed in applyPaymentToLoan).
+      const loanStartDate = (loan as any).start_date ?? (loan as any).created_at;
+      if (!loanStartDate) {
+        throw new AppError(400, "Loan has not been approved (missing start date)");
       }
 
-      // Calculate monthly interest
+      // Calculate monthly interest (Prisma returns snake_case field names)
       const monthlyInterest = this.calculateMonthlyInterest(
-        (loan as any).principalBalance,
-        (loan as any).interestRate
+        Number((loan as any).principal_balance),
+        Number((loan as any).interest_rate)
       );
 
       // Calculate total due including compounded interest from rollover
-      const compoundedInterest = (loan as any).compoundedInterest || 0;
+      const compoundedInterest = Number((loan as any).compounded_interest || 0);
       const totalDue = this.calculateTotalDue(monthlyInterest, compoundedInterest);
 
       // Check for partial payment and process rollover if needed
@@ -227,7 +240,7 @@ export class PaymentService {
       }
 
       // Calculate late fee if applicable
-      const expectedDueDate = (loan as any).nextDueDate || new Date();
+      const expectedDueDate = (loan as any).next_due_date || new Date();
       const { lateDays, lateFee } = this.calculateLateFee(
         monthlyInterest,
         expectedDueDate,
@@ -244,15 +257,15 @@ export class PaymentService {
       // Calculate new principal balance (ensure it doesn't go negative)
       const newPrincipalBalance = Math.max(
         0,
-        (loan as any).principalBalance - principalReduction
+        Number((loan as any).principal_balance) - principalReduction
       );
 
       // Handle very small balance (rounding)
       const finalPrincipalBalance = newPrincipalBalance < 0.01 ? 0 : newPrincipalBalance;
 
       // Mark payment as processed
-      const newMarkedPayments = Array.isArray((loan as any).markedPayments)
-        ? [...(loan as any).markedPayments]
+      const newMarkedPayments = Array.isArray((loan as any).marked_payments)
+        ? [...(loan as any).marked_payments]
         : [];
       if (!newMarkedPayments.includes(monthNumber)) {
         newMarkedPayments.push(monthNumber);
@@ -307,8 +320,8 @@ export class PaymentService {
       }
 
       // Mark current payment if not already marked
-      const markedPayments = Array.isArray((loan as any).markedPayments)
-        ? [...(loan as any).markedPayments]
+      const markedPayments = Array.isArray((loan as any).marked_payments)
+        ? [...(loan as any).marked_payments]
         : [];
       if (!markedPayments.includes(monthNumber)) {
         markedPayments.push(monthNumber);
@@ -319,13 +332,19 @@ export class PaymentService {
         where: { id: loanId },
         data: {
           principal_balance: calculation.newPrincipalBalance,
-          amount_paid: ((loan as any).amount_paid || 0) + calculation.principalReduction,
+          // amount_paid = total money received (interest + fees + principal), so
+          // the UI's "paid so far" / progress reflects the full installment.
+          // NOTE: Number(...) is required — Prisma Decimal.valueOf() returns a
+          // string, so Decimal + number would string-concatenate.
+          amount_paid: Number((loan as any).amount_paid || 0) + calculation.interestPaid + calculation.feesPaid + calculation.principalReduction,
           default_charge_accrued:
-            ((loan as any).default_charge_accrued || 0) + calculation.feesPaid,
+            Number((loan as any).default_charge_accrued || 0) + calculation.feesPaid,
           status: calculation.newStatus as any,
           marked_payments: markedPayments,
           next_due_date: calculation.nextDueDate,
           last_payment_date: new Date(),
+          // Heal missing start_date for legacy loans so future approvals work
+          start_date: (loan as any).start_date ?? (loan as any).created_at,
         },
       });
 

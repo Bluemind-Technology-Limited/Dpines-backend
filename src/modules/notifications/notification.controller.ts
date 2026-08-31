@@ -142,7 +142,7 @@ router.get(
   "/admin",
   authenticate,
   asyncHandler(async (_req: Request, res: Response) => {
-    const prisma = (await import("@/configs/database")).default;
+    const prisma = (await import("../../configs/database.js")).default;
     const notifications = await prisma.admin_notifications.findMany({
       orderBy: { created_at: "desc" },
     });
@@ -159,7 +159,7 @@ router.put(
   authenticate,
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const prisma = (await import("@/configs/database")).default;
+    const prisma = (await import("../../configs/database.js")).default;
     const updated = await prisma.admin_notifications.update({
       where: { id },
       data: { is_read: true },
@@ -176,7 +176,7 @@ router.put(
   "/admin/read-all",
   authenticate,
   asyncHandler(async (_req: Request, res: Response) => {
-    const prisma = (await import("@/configs/database")).default;
+    const prisma = (await import("../../configs/database.js")).default;
     const result = await prisma.admin_notifications.updateMany({
       where: { is_read: false },
       data: { is_read: true },

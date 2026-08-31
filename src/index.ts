@@ -92,25 +92,38 @@ const server = app.listen(PORT, async () => {
   console.log(`✓ Environment: ${env.NODE_ENV}`);
   console.log(`✓ CORS enabled for: ${env.CORS_ORIGIN}`);
 
+  // Wait a moment for database connection to establish
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
   // Sync historical rollover balances in background on startup
-  loanService.syncRolloverBalances().catch((err) => {
-    console.error("Failed to run startup rollover balance sync:", err);
-  });
+  (async () => {
+    try {
+      await loanService.syncRolloverBalances();
+      console.log("✓ Rollover balances synced successfully");
+    } catch (err) {
+      console.error("Failed to run startup rollover balance sync:", err);
+      // Don't fail the server startup if sync fails
+    }
+  })();
 
   // Seed default admin account created template if it doesn't exist
-  prisma.communication_templates.upsert({
-    where: { name: "admin_account_created" },
-    update: {},
-    create: {
-      name: "admin_account_created",
-      subject: "Your DPINES Account Has Been Created",
-      body: "Hello {{first_name}},\n\nYour account has been created by the administrator on DPINES Nigeria.\n\nYou can access your account using your email: {{email}}.\n\nTo log in and set up your password, please go to the login screen and click 'Forgot Password' or reset your password using OTP.\n\nThank you,\nDPINES Support",
-      type: "email",
-      is_active: true,
-    },
-  }).catch((err) => {
+  try {
+    await prisma.communication_templates.upsert({
+      where: { name: "admin_account_created" },
+      update: {},
+      create: {
+        name: "admin_account_created",
+        subject: "Your DPINES Account Has Been Created",
+        body: "Hello {{first_name}},\n\nYour account has been created by the administrator on DPINES Nigeria.\n\nYou can access your account using your email: {{email}}.\n\nTo log in and set up your password, please go to the login screen and click 'Forgot Password' or reset your password using OTP.\n\nThank you,\nDPINES Support",
+        type: "email",
+        is_active: true,
+      },
+    });
+    console.log("✓ Communication templates seeded successfully");
+  } catch (err) {
     console.error("Failed to seed default communication templates:", err);
-  });
+    // Don't fail the server startup if seeding fails
+  }
 });
 
 // Graceful shutdown
