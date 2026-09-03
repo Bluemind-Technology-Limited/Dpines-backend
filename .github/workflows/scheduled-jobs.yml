@@ -1,0 +1,29 @@
+name: Scheduled Background Jobs
+
+on:
+  schedule:
+    # Run daily at 9:00 AM UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
+
+jobs:
+  run-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Payment Reminders
+        run: |
+          curl -X POST "${{ secrets.BACKEND_API_URL }}/api/jobs/trigger/payment_reminders" \
+            -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
+            -H "Content-Type: application/json"
+
+      - name: Trigger Late Fee Application
+        run: |
+          curl -X POST "${{ secrets.BACKEND_API_URL }}/api/jobs/trigger/late_fees" \
+            -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
+            -H "Content-Type: application/json"
+
+      - name: Trigger Maturity Processing
+        run: |
+          curl -X POST "${{ secrets.BACKEND_API_URL }}/api/jobs/trigger/maturity" \
+            -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
+            -H "Content-Type: application/json"
