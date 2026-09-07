@@ -30,7 +30,7 @@ export const env = {
 
 
   // CORS
-  CORS_ORIGIN: process.env.CORS_ORIGIN || "http://localhost:5173",
+  CORS_ORIGIN: (process.env.CORS_ORIGIN || "http://localhost:5173").split(",").map(o => o.trim()),
 };
 
 // Validate required environment variables

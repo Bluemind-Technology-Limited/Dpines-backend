@@ -41,6 +41,21 @@ export class InvestmentService {
         },
       });
 
+      // Log transaction to ledger
+      try {
+        await ledgerService.logTransaction({
+          userId,
+          amount,
+          type: "deposit" as any,
+          sourceId: investment.id,
+          method: "internal",
+          description: `Investment created: ₦${amount.toLocaleString()} at ${interestRate}% for ${termMonths} months (${payoutFrequency})`,
+        });
+      } catch (ledgerError) {
+        console.error("[LEDGER ERROR] Failed to log investment creation:", ledgerError);
+        // Don't fail the investment creation if ledger logging fails
+      }
+
       return investment;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -229,17 +244,39 @@ export class InvestmentService {
     }
   }
 
-  async topUpInvestment(
+  // Request a top-up — creates a PENDING request that an admin must approve.
+  // The investment itself is NOT changed here.
+  async requestInvestmentTopUp(
     investmentId: string,
+    userId: string,
     amount: number,
-    method: "bank_transfer" | "wallet" | "card" = "bank_transfer"
-  ): Promise<Investment> {
+    method: "bank_transfer" = "bank_transfer",
+    receiptUrl: string,  // REQUIRED - no longer optional
+    tenureExtensionType: string = "maintain",
+    customExtensionMonths?: number
+  ) {
     try {
+      if (amount <= 0) {
+        throw new AppError(400, "Top-up amount must be positive");
+      }
+
+      // Receipt is mandatory for audit trail and admin verification
+      if (!receiptUrl || receiptUrl.trim() === "") {
+        throw new AppError(400, "Receipt proof is required for top-up requests");
+      }
+
+      // Validate tenure extension parameters
+      const validExtensionTypes = ["maintain", "extend_6", "extend_12", "custom"];
+      if (!validExtensionTypes.includes(tenureExtensionType)) {
+        throw new AppError(400, "Invalid tenure extension type");
+      }
+
+      if (tenureExtensionType === "custom" && (!customExtensionMonths || customExtensionMonths <= 0)) {
+        throw new AppError(400, "Custom extension months must be positive");
+      }
+
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
-        include: {
-          users: true,
-        },
       });
 
       if (!investment) {
@@ -250,80 +287,171 @@ export class InvestmentService {
         throw new AppError(400, "Investment is not active or has not started");
       }
 
+      const topUp = await prisma.investmentTopup.create({
+        data: {
+          investment_id: investmentId,
+          user_id: userId,
+          amount,
+          method,
+          receipt_url: receiptUrl,
+          status: "pending",
+          tenure_extension_type: tenureExtensionType,
+          custom_extension_months: customExtensionMonths || null,
+        },
+      });
+
+      console.log(`[TOP-UP] Request created for investment ${investmentId} (amount ${amount}, extension: ${tenureExtensionType}, receipt provided)`);
+      return topUp;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, "Failed to create top-up request");
+    }
+  }
+
+  // Approve a pending top-up — applies the funds to the investment WITHOUT
+  // resetting the timeline: start_date / term_months / end_date stay exactly
+  // as scheduled, so the payout schedule and maturity date are preserved.
+  // Top-up earns interest only for the remaining duration until original end_date.
+  async approveInvestmentTopUp(topUpId: string) {
+    try {
+      const topUp = await prisma.investmentTopup.findUnique({
+        where: { id: topUpId },
+        include: {
+          investments: {
+            include: {
+              users: true,
+            },
+          },
+        },
+      });
+
+      if (!topUp) {
+        throw new AppError(404, "Top-up request not found");
+      }
+
+      if ((topUp as any).status !== "pending") {
+        throw new AppError(400, "Top-up request is not pending");
+      }
+
+      const investment = (topUp as any).investments;
+      if (!investment) {
+        throw new AppError(404, "Investment not found");
+      }
+
+      if (investment.status !== "active") {
+        throw new AppError(400, "Investment is not active");
+      }
+
+      if (!investment.end_date) {
+        throw new AppError(400, "Investment end date not set");
+      }
+
+      const topUpAmount = Number((topUp as any).amount);
+      const currentPrincipal = Number(investment.amount);  // Use actual principal, not current_value which includes accrued interest
+      const newPrincipal = currentPrincipal + topUpAmount;
+
+      // CRITICAL: Preserve accrued profit when applying top-up
+      // current_value includes both principal AND accrued profit
+      // We need to extract the profit and add it back to avoid losing it
+      const currentValue = Number(investment.current_value);
+      const accruedProfit = Math.max(0, currentValue - currentPrincipal);
+      const newCurrentValue = newPrincipal + accruedProfit;
+
+      console.log(`[TOP-UP] Profit preservation: currentPrincipal=${currentPrincipal}, currentValue=${currentValue}, accruedProfit=${accruedProfit}, newCurrentValue=${newCurrentValue}`);
+
+      // Calculate remaining months from now until original end_date
       const now = new Date();
+      const remainingMonths = getMonthsBetweenDates(now, investment.end_date);
 
-      // 1. Calculate accrued months elapsed up to today
-      const monthsElapsed = getMonthsBetweenDates(
-        investment.start_date,
-        now
-      );
+      console.log(`[TOP-UP] Calculating interest for ${remainingMonths} remaining months until ${investment.end_date}`);
 
-      // 2. Calculate the current value (capitalized up to the top-up moment)
-      const currentValue = calculateInvestmentCurrentValue(
-        Number(investment.initial_amount) || Number(investment.amount),
-        Number(investment.interest_rate),
-        monthsElapsed,
-        investment.payout_frequency
-      );
+      // Handle tenure extension
+      const tenureExtensionType = (topUp as any).tenure_extension_type || "maintain";
+      let newEndDate = investment.end_date;
+      let newTermMonths = investment.term_months;
+      let extensionMonths = 0;
 
-      // 3. Compute new combined principal value
-      const newPrincipal = currentValue + amount;
+      if (tenureExtensionType === "maintain") {
+        // Keep original end date - no changes
+        console.log(`[TOP-UP] Tenure: MAINTAIN - No extension`);
+      } else if (tenureExtensionType === "extend_6") {
+        extensionMonths = 6;
+        newEndDate = new Date(investment.end_date);
+        newEndDate.setMonth(newEndDate.getMonth() + 6);
+        newTermMonths = investment.term_months + 6;
+        console.log(`[TOP-UP] Tenure: EXTEND BY 6 MONTHS - New end date: ${newEndDate.toISOString()}`);
+      } else if (tenureExtensionType === "extend_12") {
+        extensionMonths = 12;
+        newEndDate = new Date(investment.end_date);
+        newEndDate.setMonth(newEndDate.getMonth() + 12);
+        newTermMonths = investment.term_months + 12;
+        console.log(`[TOP-UP] Tenure: EXTEND BY 12 MONTHS - New end date: ${newEndDate.toISOString()}`);
+      } else if (tenureExtensionType === "custom") {
+        extensionMonths = (topUp as any).custom_extension_months || 0;
+        if (extensionMonths > 0) {
+          newEndDate = new Date(investment.end_date);
+          newEndDate.setMonth(newEndDate.getMonth() + extensionMonths);
+          newTermMonths = investment.term_months + extensionMonths;
+          console.log(`[TOP-UP] Tenure: EXTEND BY ${extensionMonths} MONTHS - New end date: ${newEndDate.toISOString()}`);
+        }
+      }
 
-      // 4. Calculate remaining term months
-      const remainingMonths = Math.max(1, investment.term_months - monthsElapsed);
-
-      // 5. Update the investment in the database
-      const updatedInvestment = await prisma.investment.update({
-        where: { id: investmentId },
+      // Update investment with new principal and (optionally) new tenure
+      await prisma.investment.update({
+        where: { id: investment.id },
         data: {
           amount: newPrincipal,
-          initial_amount: newPrincipal,
-          current_value: newPrincipal,
-          start_date: now, // Reset the baseline date for compound interest going forward
-          term_months: remainingMonths,
+          current_value: newCurrentValue,  // Now preserves accrued profit!
+          ...(extensionMonths > 0 && {
+            end_date: newEndDate,
+            term_months: newTermMonths,
+          }),
+          // EXPLICITLY NOT modifying: start_date, status, initial_amount
         },
       });
 
-      // 6. Log transaction to ledger
-      await ledgerService.logTransaction({
-        userId: investment.user_id,
-        amount,
-        type: "deposit" as any,
-        method: method as any,
-        sourceId: investmentId,
-        description: `Investment Top-Up of ₦${amount} (New Balance: ₦${newPrincipal})`,
-        metadata: {
-          previousPrincipal: Number(investment.amount),
-          capitalizedAccruedInterest: currentValue - Number(investment.amount),
-          topUpAmount: amount,
-          newPrincipal,
+      const approvedTopUp = await prisma.investmentTopup.update({
+        where: { id: topUpId },
+        data: {
+          status: "approved",
+          approved_at: new Date(),
         },
       });
 
-      // 7. Log audit action
-      await auditService.logAction({
-        adminId: investment.user_id, // Self or Admin, fallback to user
-        targetUserId: investment.user_id,
-        action: "investment_updated",
-        oldValues: {
-          amount: Number(investment.amount),
-          term_months: investment.term_months,
-          start_date: investment.start_date,
-        },
-        newValues: {
-          amount: newPrincipal,
-          term_months: remainingMonths,
-          start_date: now,
-        },
-      });
+      console.log(`[TOP-UP] Approved ${topUpId}: ${topUpAmount} applied to investment ${investment.id} (new principal ${newPrincipal}, remaining months: ${remainingMonths}, extension: ${extensionMonths}mo)`);
 
-      // 8. Trigger confirmation email via Edge Function
-      if ((investment as any).users) {
-        const user = (investment as any).users;
+      // Log transaction to ledger with extension info
+      try {
+        const extensionNote = extensionMonths > 0 ? `, Tenure Extended by ${extensionMonths} months` : "";
+        await ledgerService.logTransaction({
+          userId: (topUp as any).user_id,
+          amount: topUpAmount,
+          type: "deposit" as any,
+          method: ((topUp as any).method || "bank_transfer") as any,
+          sourceId: investment.id,
+          description: `Investment Top-Up of ₦${topUpAmount} (New Principal: ₦${newPrincipal}, Interest for ${remainingMonths} months${extensionNote})`,
+          metadata: {
+            topUpAmount,
+            newPrincipal,
+            approvedTopUpId: topUpId,
+            remainingMonths,
+            originalEndDate: investment.end_date.toISOString(),
+            newEndDate: newEndDate.toISOString(),
+            topUpApprovedDate: new Date().toISOString(),
+            tenureExtension: extensionMonths,
+          },
+        });
+      } catch (ledgerError) {
+        console.error("Failed to log top-up transaction:", ledgerError);
+      }
+
+      // Trigger confirmation email via Edge Function
+      if (investment.users) {
+        const user = investment.users;
         edgeFunctionService.sendInvestmentTopUpEmail(
           user.email,
           user.first_name || "Investor",
-          amount,
+          topUpAmount,
           newPrincipal,
           investment.id
         ).catch((err) => {
@@ -331,11 +459,65 @@ export class InvestmentService {
         });
       }
 
-      return updatedInvestment as unknown as Investment;
+      return approvedTopUp;
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw new AppError(500, "Failed to top up investment");
+      throw new AppError(500, "Failed to approve top-up");
     }
+  }
+
+  // Reject a pending top-up request
+  async rejectInvestmentTopUp(topUpId: string, reason: string) {
+    try {
+      const topUp = await prisma.investmentTopup.findUnique({
+        where: { id: topUpId },
+      });
+
+      if (!topUp) {
+        throw new AppError(404, "Top-up request not found");
+      }
+
+      if ((topUp as any).status !== "pending") {
+        throw new AppError(400, "Top-up request is not pending");
+      }
+
+      const rejectedTopUp = await prisma.investmentTopup.update({
+        where: { id: topUpId },
+        data: {
+          status: "rejected",
+          admin_notes: reason,
+        },
+      });
+
+      console.log(`[TOP-UP] Rejected ${topUpId}: ${reason || "no reason"}`);
+      return rejectedTopUp;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, "Failed to reject top-up");
+    }
+  }
+
+  // List top-up requests — admins see all, a regular user sees only their own
+  async getInvestmentTopUps(userId?: string, status?: string) {
+    const where: any = {};
+    if (userId) {
+      where.user_id = userId;
+    }
+    if (status) {
+      where.status = status;
+    }
+
+    return prisma.investmentTopup.findMany({
+      where,
+      include: {
+        investments: {
+          include: {
+            users: true,
+          },
+        },
+      },
+      orderBy: { submitted_at: "desc" },
+    });
   }
 
   async updateInvestmentValue(investmentId: string): Promise<Investment> {
@@ -549,6 +731,7 @@ export class InvestmentService {
   }
 
   // Get investment payout schedule - Returns calculated payout dates and amounts based on payout frequency
+  // If a top-up was approved, interest on top-up is calculated only until original end_date
   async getPayoutSchedule(investmentId: string): Promise<{
     payoutSchedule: {
       payoutNumber: number;
@@ -572,6 +755,16 @@ export class InvestmentService {
         throw new AppError(400, "Investment has not been started");
       }
 
+      // Check if there are approved top-ups to determine principal split
+      // Query ALL approved top-ups, not just the first one
+      const approvedTopUps = await prisma.investmentTopup.findMany({
+        where: {
+          investment_id: investmentId,
+          status: "approved",
+        },
+        orderBy: { approved_at: "asc" },
+      });
+
       const markedPayouts = investment.marked_payouts || [];
       const payoutSchedule: {
         payoutNumber: number;
@@ -585,8 +778,25 @@ export class InvestmentService {
       if (investment.payout_frequency === "month") payoutIntervalMonths = 6;
       if (investment.payout_frequency === "reinvestment") payoutIntervalMonths = 1; // reinvestment still pays monthly but keeps principal invested
 
-      // Calculate payouts based on frequency
+      // Get the original principal before any top-ups
+      const originalPrincipal = investment.initial_amount || investment.amount;
+
+      // Create a map of top-ups by approval month for easy lookup
+      const topUpsByMonth = new Map<number, number>();
+      approvedTopUps.forEach((topUp: any) => {
+        if (topUp.approved_at && investment.start_date) {
+          const approvedMonth = getMonthsBetweenDates(investment.start_date, topUp.approved_at);
+          const existingAmount = topUpsByMonth.get(approvedMonth) || 0;
+          topUpsByMonth.set(approvedMonth, existingAmount + Number(topUp.amount));
+          console.log(`[PAYOUT] Top-up of ₦${topUp.amount} approved in month ${approvedMonth}`);
+        }
+      });
+
+      // Calculate payout based on frequency
       let payoutCount = 0;
+      const now = new Date();
+      const monthlyRate = Number(investment.interest_rate) / 100;
+      
       for (
         let month = payoutIntervalMonths;
         month <= investment.term_months;
@@ -594,24 +804,75 @@ export class InvestmentService {
       ) {
         payoutCount++;
 
-        // Calculate payout amount for this period
-        const compoundBalance = this.calculateCompoundBalance(
-          Number(investment.initial_amount) || Number(investment.amount),
-          Number(investment.interest_rate),
-          month
-        );
-
-        // Interest earned in this period
-        const previousBalance = this.calculateCompoundBalance(
-          Number(investment.initial_amount) || Number(investment.amount),
-          Number(investment.interest_rate),
-          month - payoutIntervalMonths
-        );
-
-        const payoutAmount = compoundBalance - previousBalance;
         const payoutDate = new Date(investment.start_date);
         payoutDate.setMonth(payoutDate.getMonth() + month);
 
+        // Determine if payout date has passed (today >= payout date)
+        const isPayoutDatePassed = now >= payoutDate;
+
+        // Calculate interest based on frequency type
+        let originalInterestThisPeriod = 0;
+        let totalTopUpInterestThisPeriod = 0;
+
+        if (investment.payout_frequency === "monthly") {
+          // SIMPLE INTEREST: Fixed interest per month based on principal
+          // Interest = Principal × Rate × Months
+          originalInterestThisPeriod = originalPrincipal * monthlyRate * payoutIntervalMonths;
+
+          // Top-up interest (simple): starts accruing from approval month
+          topUpsByMonth.forEach((topUpAmount, topUpApprovedMonth) => {
+            if (month >= topUpApprovedMonth) {
+              // Top-up earns simple interest from approval month onwards
+              const topUpInterestThisMonth = topUpAmount * monthlyRate * payoutIntervalMonths;
+              totalTopUpInterestThisPeriod += topUpInterestThisMonth;
+
+              console.log(`[PAYOUT] Month ${month}: TopUp(approved month ${topUpApprovedMonth}, amount ₦${topUpAmount}) earned ₦${topUpInterestThisMonth.toFixed(2)} (simple interest)`);
+            }
+          });
+        } else {
+          // COMPOUND INTEREST: For "reinvestment" and "month" (6-monthly) frequencies
+          // Interest on original principal (for full period)
+          const originalBalance = this.calculateCompoundBalance(
+            Number(originalPrincipal),
+            Number(investment.interest_rate),
+            month
+          );
+          const previousOriginalBalance = this.calculateCompoundBalance(
+            Number(originalPrincipal),
+            Number(investment.interest_rate),
+            month - payoutIntervalMonths
+          );
+          originalInterestThisPeriod = originalBalance - previousOriginalBalance;
+
+          // Interest on all top-ups (each earned from their approval month onwards)
+          topUpsByMonth.forEach((topUpAmount, topUpApprovedMonth) => {
+            // Top-up starts earning from the SAME month it's approved (month >= approvalMonth)
+            if (month >= topUpApprovedMonth) {
+              const monthsSinceTopUp = month - topUpApprovedMonth;
+              const previousMonthsSinceTopUp = Math.max(0, month - payoutIntervalMonths - topUpApprovedMonth);
+
+              const topUpBalance = this.calculateCompoundBalance(
+                topUpAmount,
+                Number(investment.interest_rate),
+                monthsSinceTopUp
+              );
+              const previousTopUpBalance = this.calculateCompoundBalance(
+                topUpAmount,
+                Number(investment.interest_rate),
+                previousMonthsSinceTopUp
+              );
+              const topUpInterestThisMonth = topUpBalance - previousTopUpBalance;
+              totalTopUpInterestThisPeriod += topUpInterestThisMonth;
+
+              console.log(`[PAYOUT] Month ${month}: TopUp(approved month ${topUpApprovedMonth}, amount ₦${topUpAmount}) earned ₦${topUpInterestThisMonth.toFixed(2)} (compound)`);
+            }
+          });
+        }
+
+        // Total payout = original interest + all top-up interest
+        const payoutAmount = originalInterestThisPeriod + totalTopUpInterestThisPeriod;
+
+        // Check if already marked as paid
         const isPaid = markedPayouts.includes(month);
 
         payoutSchedule.push({
@@ -620,6 +881,9 @@ export class InvestmentService {
           payoutAmount: Number(payoutAmount.toFixed(2)),
           isPaid,
         });
+
+        const frequencyType = investment.payout_frequency === "monthly" ? "SIMPLE" : "COMPOUND";
+        console.log(`[PAYOUT CALC] Month ${month}: Date=${payoutDate.toISOString()}, IsPassed=${isPayoutDatePassed}, Original=${originalInterestThisPeriod.toFixed(2)} + AllTopUps=${totalTopUpInterestThisPeriod.toFixed(2)} = Total=${payoutAmount.toFixed(2)}, Marked=${isPaid}, Type=${frequencyType}`);
       }
 
       const totalPayoutsPaid = markedPayouts.length;
@@ -1223,14 +1487,66 @@ export class InvestmentService {
       throw new AppError(404, "Investment not found");
     }
 
+    // Guard: If there's a pending top-up, prevent timeline modification to preserve investment maturity
+    if (updates.start_date !== undefined || updates.term_months !== undefined || updates.end_date !== undefined) {
+      const pendingTopUp = await prisma.investmentTopup.findFirst({
+        where: {
+          investment_id: investmentId,
+          status: "pending",
+        },
+      });
+
+      if (pendingTopUp) {
+        throw new AppError(
+          400,
+          "Cannot modify investment timeline while a top-up is pending approval. Please approve or reject the top-up first."
+        );
+      }
+    }
+
     const updatedData: any = {};
     if (updates.amount !== undefined) updatedData.amount = updates.amount;
-    if (updates.current_value !== undefined) updatedData.current_value = updates.current_value;
+    // Only accept manual current_value if neither start_date, rate, nor amount changed (for manual edits)
+    const shouldAutoCalculate = updates.start_date !== undefined || updates.interest_rate !== undefined || updates.amount !== undefined;
+    if (updates.current_value !== undefined && !shouldAutoCalculate) {
+      updatedData.current_value = updates.current_value;
+    }
     if (updates.interest_rate !== undefined) updatedData.interest_rate = updates.interest_rate;
     if (updates.start_date !== undefined) updatedData.start_date = new Date(updates.start_date);
     if (updates.term_months !== undefined) updatedData.term_months = updates.term_months;
     if (updates.end_date !== undefined) updatedData.end_date = updates.end_date ? new Date(updates.end_date) : null;
     if (updates.status !== undefined && updates.status !== "") updatedData.status = updates.status;
+
+    // Auto-calculate current value if start_date, rate, or amount changed
+    // This recalculates accrued interest based on months elapsed
+    if (shouldAutoCalculate) {
+      const startDate = updates.start_date ? new Date(updates.start_date) : investment.start_date;
+      const interestRate = updates.interest_rate !== undefined ? updates.interest_rate : investment.interest_rate;
+      const principal = updates.amount !== undefined ? updates.amount : investment.amount;
+      const payoutFrequency = investment.payout_frequency;
+
+      if (startDate && principal && interestRate !== null && payoutFrequency) {
+        // Calculate months elapsed from start date to now
+        const monthsElapsed = getMonthsBetweenDates(startDate, new Date());
+
+        // Calculate current value based on payout frequency type
+        let calculatedCurrentValue = principal;
+
+        if (payoutFrequency === "reinvestment") {
+          // Compound interest: A = P(1 + r)^n
+          const monthlyRate = interestRate / 100;
+          calculatedCurrentValue = principal * Math.pow(1 + monthlyRate, monthsElapsed);
+        } else if (payoutFrequency === "monthly") {
+          // Simple interest: A = P + (P × r × n)
+          const totalInterest = principal * (interestRate / 100) * monthsElapsed;
+          calculatedCurrentValue = principal + totalInterest;
+        }
+
+        updatedData.current_value = Math.max(principal, calculatedCurrentValue); // Never go below principal
+
+        console.log(`[INVESTMENT UPDATE] Auto-calculated current_value for ${investmentId}: Principal=${principal}, Months=${monthsElapsed}, Rate=${interestRate}%, Type=${payoutFrequency}, NewValue=${calculatedCurrentValue.toFixed(2)}`);
+      }
+    }
 
     const result = await prisma.investment.update({
       where: { id: investmentId },

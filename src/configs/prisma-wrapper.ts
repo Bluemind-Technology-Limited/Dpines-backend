@@ -47,6 +47,7 @@ export const prismaWrapper = prismaClient as PrismaWrapper & {
   ticketMessage: PrismaClient['ticket_messages'];
   advert: PrismaClient['adverts'];
   repaymentRequest: PrismaClient['repayment_requests'];
+  investmentTopup: PrismaClient['investment_topups'];
   transactionLedger: PrismaClient['transaction_ledger'];
   otpRecord: PrismaClient['otp_records'];
   adminNotification: PrismaClient['admin_notifications'];
@@ -67,6 +68,7 @@ Object.assign(prismaWrapper, {
   ticket_messages: prismaClient.ticket_messages,
   adverts: prismaClient.adverts,
   repayment_requests: prismaClient.repayment_requests,
+  investment_topups: prismaClient.investment_topups,
   transaction_ledger: prismaClient.transaction_ledger,
   otp_records: prismaClient.otp_records,
   admin_notifications: prismaClient.admin_notifications,
@@ -95,6 +97,7 @@ Object.assign(prismaWrapper, {
   
   // Support models
   repaymentRequest: prismaClient.repayment_requests,
+  investmentTopup: prismaClient.investment_topups,
   
   // Transaction models
   transactionLedger: prismaClient.transaction_ledger,

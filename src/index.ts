@@ -25,6 +25,8 @@ const app: Application = express();
 
 // Middleware
 app.use(helmet());
+
+// CORS origins is now an array from env
 app.use(
   cors({
     origin: env.CORS_ORIGIN,
@@ -90,7 +92,7 @@ const PORT = env.PORT;
 const server = app.listen(PORT, async () => {
   console.log(`✓ Server running on http://localhost:${PORT}`);
   console.log(`✓ Environment: ${env.NODE_ENV}`);
-  console.log(`✓ CORS enabled for: ${env.CORS_ORIGIN}`);
+  console.log(`✓ CORS enabled for: ${env.CORS_ORIGIN.join(", ")}`);
 
   // Wait a moment for database connection to establish
   await new Promise(resolve => setTimeout(resolve, 1000));

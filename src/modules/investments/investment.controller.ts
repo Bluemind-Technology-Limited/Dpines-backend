@@ -162,22 +162,73 @@ export const completeInvestment = asyncHandler(
 import { z } from "zod";
 
 const topUpInvestmentSchema = z.object({
-  amount: z.number().positive(),
-  method: z.enum(["bank_transfer", "wallet", "card"]).default("bank_transfer"),
+  amount: z.number().positive("Top-up amount must be positive"),
+  method: z.enum(["bank_transfer"]).default("bank_transfer"),
+  receiptUrl: z.string().url("Valid receipt URL is required").min(1, "Receipt proof is required"),
+  tenureExtensionType: z.enum(["maintain", "extend_6", "extend_12", "custom"]).default("maintain"),
+  customExtensionMonths: z.number().int().positive().optional(),
 });
 
-export const topUpInvestment = asyncHandler(
+const rejectTopUpSchema = z.object({
+  reason: z.string().min(1, "Rejection reason is required"),
+});
+
+// Submit a top-up request (pending — requires admin approval)
+export const requestInvestmentTopUp = asyncHandler(
   async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new AppError(401, "Unauthorized");
+    }
     const { investmentId } = req.params;
     const body = topUpInvestmentSchema.parse(req.body);
 
-    const investment = await investmentService.topUpInvestment(
+    const topUp = await investmentService.requestInvestmentTopUp(
       investmentId,
+      req.user.sub,
       body.amount,
-      body.method
+      body.method,
+      body.receiptUrl,
+      body.tenureExtensionType,
+      body.customExtensionMonths
     );
 
-    sendSuccess(res, investment, "Investment topped up successfully");
+    sendSuccess(res, topUp, "Top-up request submitted for approval", 201);
+  }
+);
+
+// List top-up requests (admin: all; user: own)
+export const getInvestmentTopUps = asyncHandler(
+  async (req: Request, res: Response) => {
+    const userRole = (req as any).user?.role?.toLowerCase() || "user";
+    const userId = (req as any).user?.sub;
+    const isAdmin = ["admin", "invest_admin"].includes(userRole);
+    const { status } = req.query;
+
+    const topUps = await investmentService.getInvestmentTopUps(
+      isAdmin ? undefined : userId,
+      status as string | undefined
+    );
+
+    sendSuccess(res, topUps, "Top-up requests fetched successfully");
+  }
+);
+
+// Approve a pending top-up (admin)
+export const approveInvestmentTopUp = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { topUpId } = req.params;
+    const topUp = await investmentService.approveInvestmentTopUp(topUpId);
+    sendSuccess(res, topUp, "Top-up approved and applied");
+  }
+);
+
+// Reject a pending top-up (admin)
+export const rejectInvestmentTopUp = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { topUpId } = req.params;
+    const body = rejectTopUpSchema.parse(req.body);
+    const topUp = await investmentService.rejectInvestmentTopUp(topUpId, body.reason);
+    sendSuccess(res, topUp, "Top-up request rejected");
   }
 );
 

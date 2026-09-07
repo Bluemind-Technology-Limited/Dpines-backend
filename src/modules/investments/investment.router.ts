@@ -10,7 +10,10 @@ import {
   updateInvestmentValue,
   getInvestmentStats,
   completeInvestment,
-  topUpInvestment,
+  requestInvestmentTopUp,
+  getInvestmentTopUps,
+  approveInvestmentTopUp,
+  rejectInvestmentTopUp,
   updateInvestmentFinancialsController,
   deleteInvestmentController,
 } from "./investment.controller.js";
@@ -26,12 +29,18 @@ router.use(requireAuth);
 router.post("/", createInvestment);
 router.get("/user/stats", getInvestmentStats);
 router.get("/user/my-investments", getUserInvestments);
+
+// Top-up workflow (must be declared before /:investmentId)
+router.get("/top-ups", getInvestmentTopUps);
+router.post("/top-ups/:topUpId/approve", requireRole(["admin", "invest_admin"]), approveInvestmentTopUp);
+router.post("/top-ups/:topUpId/reject", requireRole(["admin", "invest_admin"]), rejectInvestmentTopUp);
+
 router.get("/:investmentId", getInvestmentById);
 
 // User investment management
 router.post("/:investmentId/maturity-action", setMaturityAction);
 router.put("/:investmentId/update-value", updateInvestmentValue);
-router.post("/:investmentId/top-up", topUpInvestment);
+router.post("/:investmentId/top-up", requestInvestmentTopUp);
 
 // Admin routes (require admin role)
 router.get("/", requireRole(["admin", "invest_admin"]), getAllInvestments);

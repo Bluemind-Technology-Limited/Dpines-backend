@@ -579,10 +579,34 @@ model investments {
   initial_amount     Decimal?          @db.Decimal(15, 2)
   users              user_profiles     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_investments_user_profiles")
   auth_users         auth_users        @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  investment_topups  investment_topups[]
 
   @@index([created_at(sort: Desc)], map: "idx_investments_created_at")
   @@index([status], map: "idx_investments_status")
   @@index([user_id], map: "idx_investments_user_id")
+  @@schema("public")
+}
+
+/// Pending top-up requests for investments (submitted by the investor, approved by an admin).
+model investment_topups {
+  id                        String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  investment_id             String       @db.Uuid
+  user_id                   String       @db.Uuid
+  amount                    Decimal      @db.Decimal(15, 2)
+  method                    String       @default("bank_transfer")
+  receipt_url               String?
+  status                    String       @default("pending")
+  admin_notes               String?
+  submitted_at              DateTime     @default(now()) @db.Timestamptz(6)
+  approved_at               DateTime?    @db.Timestamptz(6)
+  tenure_extension_type     String       @default("maintain")
+  custom_extension_months   Int?
+  investments               investments  @relation(fields: [investment_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user_profiles             user_profiles @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([investment_id], map: "idx_investment_topups_investment_id")
+  @@index([status], map: "idx_investment_topups_status")
+  @@index([user_id], map: "idx_investment_topups_user_id")
   @@schema("public")
 }
 
@@ -778,6 +802,7 @@ model user_profiles {
   loans              loans[]
   // created_loans      loans[]              @relation("loan_creators")
   repayment_requests repayment_requests[]
+  investment_topups  investment_topups[]
   ticket_messages    ticket_messages[]
   tickets            tickets[]
   transaction_ledger transaction_ledger[]
