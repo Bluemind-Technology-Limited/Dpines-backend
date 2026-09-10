@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { investmentService } from "./investment.service.js";
 import { sendSuccess, sendPaginated, asyncHandler } from "../../lib/utils.js";
 import { AppError } from "../../middlewares/error.middleware.js";
+import { edgeFunctionService } from "../../services/edge-function.service.js";
 import {
   createInvestmentSchema,
   approveInvestmentSchema,
@@ -9,6 +10,7 @@ import {
   setMaturityActionSchema,
   updateInvestmentFinancialsSchema,
 } from "../../lib/validators.js";
+import { z } from "zod";
 
 export const createInvestment = asyncHandler(
   async (req: Request, res: Response) => {
@@ -159,8 +161,6 @@ export const completeInvestment = asyncHandler(
   }
 );
 
-import { z } from "zod";
-
 const topUpInvestmentSchema = z.object({
   amount: z.number().positive("Top-up amount must be positive"),
   method: z.enum(["bank_transfer"]).default("bank_transfer"),
@@ -241,10 +241,109 @@ export const updateInvestmentFinancialsController = asyncHandler(
   }
 );
 
+// Send payout notification email for an investment
+export const sendPayoutNotification = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { investmentId } = req.params;
+    const body = z.object({
+      payoutNumber: z.number().int().positive(),
+      userEmail: z.string().email(),
+      userName: z.string().min(1),
+      principalAmount: z.number().positive(),
+      payoutAmount: z.number().positive(),
+      payoutDateISO: z.string().datetime(),
+      currentValue: z.number().positive(),
+      isReinvestment: z.boolean().optional().default(false),
+    }).parse(req.body);
+
+    // Get investment details for logging
+    const investment = await investmentService.getInvestmentById(investmentId);
+    if (!investment) {
+      throw new AppError(404, "Investment not found");
+    }
+
+    // Send notification via edge function
+    console.log(`[PAYOUT NOTIFY] Sending notification for investment ${investmentId}, payout #${body.payoutNumber} to ${body.userEmail}`);
+
+    const result = await edgeFunctionService.sendPayoutNotificationEmail(
+      body.userEmail,
+      body.userName,
+      body.payoutNumber,
+      body.payoutAmount,
+      body.payoutDateISO,
+      body.currentValue,
+      investmentId,
+      body.isReinvestment
+    );
+
+    console.log(`[PAYOUT NOTIFY] Edge function result:`, result);
+
+    sendSuccess(res, { notified: true }, "Payout notification sent successfully");
+  }
+);
+
 export const deleteInvestmentController = asyncHandler(
   async (req: Request, res: Response) => {
     const { investmentId } = req.params;
     const result = await investmentService.deleteInvestment(investmentId);
     sendSuccess(res, result, "Investment deleted successfully");
+  }
+);
+
+// Mark a payout as paid/processed
+export const markInvestmentPayoutController = asyncHandler(
+  async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new AppError(401, "Unauthorized");
+    }
+
+    const { investmentId } = req.params;
+    console.log(`[MARK PAYOUT CONTROLLER] Received request for investment: ${investmentId}, body:`, req.body);
+    
+    const body = z.object({
+      payoutNumber: z.number().int().positive("Payout number must be a positive integer"),
+      payoutAmount: z.number().positive("Payout amount must be positive"),
+    }).parse(req.body);
+
+    console.log(`[MARK PAYOUT] Marking payout #${body.payoutNumber} for investment ${investmentId}, amount: ₦${body.payoutAmount}`);
+
+    const result = await investmentService.markInvestmentPayout(
+      investmentId,
+      body.payoutNumber,
+      body.payoutAmount,
+      req.user.sub  // ← Added adminId (the logged-in user)
+    );
+
+    console.log(`[MARK PAYOUT] Successfully marked payout for investment ${investmentId}`);
+
+    sendSuccess(res, result, "Payout marked successfully");
+  }
+);
+
+// Admin: Manually deduct amount from investment
+export const manualDeductController = asyncHandler(
+  async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new AppError(401, "Unauthorized");
+    }
+
+    const { investmentId } = req.params;
+    const body = z.object({
+      amount: z.number().positive("Amount must be positive"),
+      purpose: z.string().min(1, "Deduction purpose is required"),
+    }).parse(req.body);
+
+    console.log(`[MANUAL DEDUCTION] Admin ${req.user.sub} deducting ₦${body.amount} from investment ${investmentId} (${body.purpose})`);
+
+    const result = await investmentService.manualDeductFromInvestment(
+      investmentId,
+      body.amount,
+      body.purpose,
+      req.user.sub
+    );
+
+    console.log(`[MANUAL DEDUCTION] Successfully completed deduction for investment ${investmentId}`);
+
+    sendSuccess(res, result, "Deduction recorded successfully");
   }
 );

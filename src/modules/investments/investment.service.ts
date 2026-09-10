@@ -72,9 +72,22 @@ export class InvestmentService {
         },
       });
 
-      return investment;
+      if (!investment) {
+        return null;
+      }
+
+      // Calculate current_value dynamically from ledger instead of using stored value
+      const currentValue = await this.calculateCurrentValueFromLedger(investmentId);
+
+      // Return investment with dynamically calculated current_value
+      return {
+        ...investment,
+        current_value: currentValue,
+      };
     } catch (error) {
-      throw new AppError(500, "Failed to fetch investment");
+      console.error("[INVESTMENT FETCH ERROR] investmentId:", investmentId, "Error:", error);
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, `Failed to fetch investment: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -361,7 +374,10 @@ export class InvestmentService {
 
       // Calculate remaining months from now until original end_date
       const now = new Date();
-      const remainingMonths = getMonthsBetweenDates(now, investment.end_date);
+      const endDate = investment.end_date instanceof Date 
+        ? investment.end_date 
+        : new Date(investment.end_date);
+      const remainingMonths = getMonthsBetweenDates(now, endDate);
 
       console.log(`[TOP-UP] Calculating interest for ${remainingMonths} remaining months until ${investment.end_date}`);
 
@@ -535,7 +551,7 @@ export class InvestmentService {
       }
 
       const monthsElapsed = getMonthsBetweenDates(
-        investment.start_date,
+        investment.start_date instanceof Date ? investment.start_date : new Date(investment.start_date),
         new Date()
       );
 
@@ -630,17 +646,30 @@ export class InvestmentService {
     _adminNotes?: string
   ): Promise<Investment> {
     try {
-      // Verify investment exists
+      // Verify investment exists and fetch user data
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: {
+          users: true,
+        },
       });
 
       if (!investment) {
         throw new AppError(404, "Investment not found");
       }
 
-      if (investment.status !== "active") {
-        throw new AppError(400, "Investment is not active");
+      console.log(`[MARK PAYOUT DEBUG] Investment ${investmentId}:`, {
+        status: investment.status,
+        start_date: investment.start_date,
+        payoutMonthNumber,
+        payoutAmount,
+        marked_payouts: investment.marked_payouts,
+        term_months: investment.term_months
+      });
+
+      // Allow marking payouts for active investments or investments that have been manually started (have start_date)
+      if (investment.status !== "active" && !investment.start_date) {
+        throw new AppError(400, "Investment must be active or have a start date to mark payouts");
       }
 
       // Check if payout already marked
@@ -660,42 +689,27 @@ export class InvestmentService {
         );
       }
 
-      // Calculate compound balance after marking payout
-      // Note: monthsElapsed calculation kept for reference but not used directly
-      // const monthsElapsed = payoutMonthNumber;
-
-      // For reinvestment frequency: interest stays invested (current_value increases)
-      // For monthly payout frequency: interest is distributed (current_value = principal only after payout)
-      let newCurrentValue = Number(investment.current_value);
-
-      if (investment.payout_frequency === "monthly") {
-        // Monthly payout: remove distributed interest from current_value
-        newCurrentValue = Number(investment.initial_amount) || Number(investment.amount);
-      } else if (investment.payout_frequency === "month") {
-        // 6-month payout: remove distributed interest every 6 months
-        if (payoutMonthNumber % 6 === 0) {
-          newCurrentValue = Number(investment.initial_amount) || Number(investment.amount);
-        }
-      }
-      // "reinvestment" frequency: keep full compound balance invested
-
-      // Mark payout
+      // Mark payout - NO NEED to manually update current_value
+      // It will be calculated dynamically from the ledger when needed
       const updatedMarkedPayouts = [...markedPayouts, payoutMonthNumber];
 
       const updatedInvestment = await prisma.investment.update({
         where: { id: investmentId },
         data: {
           marked_payouts: updatedMarkedPayouts,
-          current_value: newCurrentValue,
+          // current_value is no longer manually updated here
+          // It will be calculated from transaction ledger on-demand
         },
       });
 
       // Log transaction - payout distribution
+      // This is the SOURCE OF TRUTH for the withdrawal impact
+      // Pass positive amount - the type "withdrawal" indicates it's being subtracted
       await ledgerService.logTransaction({
         userId: investment.user_id,
         type: "withdrawal" as any,
         method: "admin_manual" as any,
-        amount: payoutAmount,
+        amount: payoutAmount,  // Positive amount - type indicates it's a withdrawal
         sourceId: investmentId,
         description: `Investment payout marked - month ${payoutMonthNumber}`,
         metadata: {
@@ -713,20 +727,48 @@ export class InvestmentService {
         action: "manual_adjustment",
         oldValues: {
           markedPayouts,
-          currentValue: investment.current_value,
         },
         newValues: {
           markedPayouts: updatedMarkedPayouts,
-          currentValue: newCurrentValue,
           payoutMonth: payoutMonthNumber,
           payoutAmount,
         },
       });
 
+      // Send email notification to user
+      try {
+        const userEmail = investment.users?.email || '';
+        const userName = investment.users?.first_name && investment.users?.last_name
+          ? `${investment.users.first_name} ${investment.users.last_name}`
+          : 'User';
+        
+        // Calculate payout date based on start date + payout month
+        const payoutDate = new Date(investment.start_date);
+        payoutDate.setMonth(payoutDate.getMonth() + payoutMonthNumber);
+
+        if (userEmail) {
+          console.log(`[MARK PAYOUT NOTIFY] Sending payout notification to ${userEmail} for payout #${payoutMonthNumber}`);
+          
+          await edgeFunctionService.callFunction('send-communication', {
+            to: userEmail,
+            subject: `Investment Payout #${payoutMonthNumber} - ₦${payoutAmount.toLocaleString()}`,
+            body: `Hello ${userName},\n\nYour payout for Investment #${investmentId.slice(-6)} has been marked as paid.\n\nPayout Details:\n• Payout Number: ${payoutMonthNumber}\n• Amount: ₦${payoutAmount.toLocaleString()}\n• Date: ${payoutDate.toLocaleDateString('en-NG')}\n• Type: credited to your account\n\nThank you for investing with DPINES.`
+          });
+
+          console.log(`[MARK PAYOUT NOTIFY] ✓ Notification sent to ${userEmail}`);
+        }
+      } catch (notifyError) {
+        console.error(`[MARK PAYOUT NOTIFY ERROR] Failed to send notification:`, notifyError);
+        // Don't fail the entire operation if notification fails
+      }
+
+      console.log(`[MARK PAYOUT] ✓ Successfully marked payout #${payoutMonthNumber} for investment ${investmentId}. Amount: ₦${payoutAmount}. Current value will be recalculated from ledger.`);
+
       return updatedInvestment;
     } catch (error) {
+      console.error(`[MARK PAYOUT ERROR] Failed for investment ${investmentId}, payout #${payoutMonthNumber}:`, error);
       if (error instanceof AppError) throw error;
-      throw new AppError(500, "Failed to mark investment payout");
+      throw new AppError(500, `Failed to mark investment payout: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -755,8 +797,10 @@ export class InvestmentService {
         throw new AppError(400, "Investment has not been started");
       }
 
+      // Use dynamically calculated current value instead of stored value
+      const currentValue = await this.calculateCurrentValueFromLedger(investmentId);
+
       // Check if there are approved top-ups to determine principal split
-      // Query ALL approved top-ups, not just the first one
       const approvedTopUps = await prisma.investmentTopup.findMany({
         where: {
           investment_id: investmentId,
@@ -776,7 +820,7 @@ export class InvestmentService {
       // Determine payout frequency interval
       let payoutIntervalMonths = 1; // default monthly
       if (investment.payout_frequency === "month") payoutIntervalMonths = 6;
-      if (investment.payout_frequency === "reinvestment") payoutIntervalMonths = 1; // reinvestment still pays monthly but keeps principal invested
+      if (investment.payout_frequency === "reinvestment") payoutIntervalMonths = 1;
 
       // Get the original principal before any top-ups
       const originalPrincipal = investment.initial_amount || investment.amount;
@@ -785,12 +829,17 @@ export class InvestmentService {
       const topUpsByMonth = new Map<number, number>();
       approvedTopUps.forEach((topUp: any) => {
         if (topUp.approved_at && investment.start_date) {
-          const approvedMonth = getMonthsBetweenDates(investment.start_date, topUp.approved_at);
+          const startDt = investment.start_date instanceof Date ? investment.start_date : new Date(investment.start_date);
+          const approvedDt = topUp.approved_at instanceof Date ? topUp.approved_at : new Date(topUp.approved_at);
+          const approvedMonth = getMonthsBetweenDates(startDt, approvedDt);
           const existingAmount = topUpsByMonth.get(approvedMonth) || 0;
           topUpsByMonth.set(approvedMonth, existingAmount + Number(topUp.amount));
-          console.log(`[PAYOUT] Top-up of ₦${topUp.amount} approved in month ${approvedMonth}`);
+          console.log(`[PAYOUT SCHEDULE] Top-up of ₦${topUp.amount} approved in month ${approvedMonth}`);
         }
       });
+
+      // Log that we're using dynamic current value
+      console.log(`[PAYOUT SCHEDULE] Using dynamically calculated current_value: ₦${currentValue.toFixed(2)}`);
 
       // Calculate payout based on frequency
       let payoutCount = 0;
@@ -816,22 +865,19 @@ export class InvestmentService {
 
         if (investment.payout_frequency === "monthly") {
           // SIMPLE INTEREST: Fixed interest per month based on principal
-          // Interest = Principal × Rate × Months
           originalInterestThisPeriod = originalPrincipal * monthlyRate * payoutIntervalMonths;
 
           // Top-up interest (simple): starts accruing from approval month
           topUpsByMonth.forEach((topUpAmount, topUpApprovedMonth) => {
             if (month >= topUpApprovedMonth) {
-              // Top-up earns simple interest from approval month onwards
               const topUpInterestThisMonth = topUpAmount * monthlyRate * payoutIntervalMonths;
               totalTopUpInterestThisPeriod += topUpInterestThisMonth;
 
-              console.log(`[PAYOUT] Month ${month}: TopUp(approved month ${topUpApprovedMonth}, amount ₦${topUpAmount}) earned ₦${topUpInterestThisMonth.toFixed(2)} (simple interest)`);
+              console.log(`[PAYOUT SCHEDULE] Month ${month}: TopUp(approved month ${topUpApprovedMonth}, amount ₦${topUpAmount}) earned ₦${topUpInterestThisMonth.toFixed(2)} (simple interest)`);
             }
           });
         } else {
           // COMPOUND INTEREST: For "reinvestment" and "month" (6-monthly) frequencies
-          // Interest on original principal (for full period)
           const originalBalance = this.calculateCompoundBalance(
             Number(originalPrincipal),
             Number(investment.interest_rate),
@@ -846,7 +892,6 @@ export class InvestmentService {
 
           // Interest on all top-ups (each earned from their approval month onwards)
           topUpsByMonth.forEach((topUpAmount, topUpApprovedMonth) => {
-            // Top-up starts earning from the SAME month it's approved (month >= approvalMonth)
             if (month >= topUpApprovedMonth) {
               const monthsSinceTopUp = month - topUpApprovedMonth;
               const previousMonthsSinceTopUp = Math.max(0, month - payoutIntervalMonths - topUpApprovedMonth);
@@ -864,7 +909,7 @@ export class InvestmentService {
               const topUpInterestThisMonth = topUpBalance - previousTopUpBalance;
               totalTopUpInterestThisPeriod += topUpInterestThisMonth;
 
-              console.log(`[PAYOUT] Month ${month}: TopUp(approved month ${topUpApprovedMonth}, amount ₦${topUpAmount}) earned ₦${topUpInterestThisMonth.toFixed(2)} (compound)`);
+              console.log(`[PAYOUT SCHEDULE] Month ${month}: TopUp(approved month ${topUpApprovedMonth}, amount ₦${topUpAmount}) earned ₦${topUpInterestThisMonth.toFixed(2)} (compound)`);
             }
           });
         }
@@ -883,11 +928,13 @@ export class InvestmentService {
         });
 
         const frequencyType = investment.payout_frequency === "monthly" ? "SIMPLE" : "COMPOUND";
-        console.log(`[PAYOUT CALC] Month ${month}: Date=${payoutDate.toISOString()}, IsPassed=${isPayoutDatePassed}, Original=${originalInterestThisPeriod.toFixed(2)} + AllTopUps=${totalTopUpInterestThisPeriod.toFixed(2)} = Total=${payoutAmount.toFixed(2)}, Marked=${isPaid}, Type=${frequencyType}`);
+        console.log(`[PAYOUT SCHEDULE] Month ${month}: Date=${payoutDate.toISOString()}, IsPassed=${isPayoutDatePassed}, Original=${originalInterestThisPeriod.toFixed(2)} + AllTopUps=${totalTopUpInterestThisPeriod.toFixed(2)} = Total=${payoutAmount.toFixed(2)}, Marked=${isPaid}, Type=${frequencyType}`);
       }
 
       const totalPayoutsPaid = markedPayouts.length;
       const totalPayoutsEarned = payoutSchedule.length;
+
+      console.log(`[PAYOUT SCHEDULE] Complete: Total Payouts Earned=${totalPayoutsEarned}, Total Marked=${totalPayoutsPaid}, Current Value Used=₦${currentValue.toFixed(2)}`);
 
       return {
         payoutSchedule,
@@ -1527,7 +1574,8 @@ export class InvestmentService {
 
       if (startDate && principal && interestRate !== null && payoutFrequency) {
         // Calculate months elapsed from start date to now
-        const monthsElapsed = getMonthsBetweenDates(startDate, new Date());
+        const startDt = startDate instanceof Date ? startDate : new Date(startDate);
+        const monthsElapsed = getMonthsBetweenDates(startDt, new Date());
 
         // Calculate current value based on payout frequency type
         let calculatedCurrentValue = principal;
@@ -1576,6 +1624,210 @@ export class InvestmentService {
     });
 
     return { id: investmentId };
+  }
+
+  // Admin: Manually deduct from investment for any reason (fees, charges, withdrawals, etc)
+  async manualDeductFromInvestment(
+    investmentId: string,
+    amount: number,
+    purpose: string,
+    adminId: string
+  ): Promise<Investment> {
+    try {
+      // Validate investment exists
+      const investment = await prisma.investment.findUnique({
+        where: { id: investmentId },
+      });
+
+      if (!investment) {
+        throw new AppError(404, "Investment not found");
+      }
+
+      if (investment.status !== "active") {
+        throw new AppError(400, "Investment is not active");
+      }
+
+      // Validate deduction amount
+      if (amount <= 0) {
+        throw new AppError(400, "Deduction amount must be positive");
+      }
+
+      // Calculate current value dynamically to ensure we have the latest value
+      const currentValue = await this.calculateCurrentValueFromLedger(investmentId);
+      if (amount > currentValue) {
+        throw new AppError(400, `Deduction amount (₦${amount}) exceeds current investment value (₦${currentValue.toFixed(2)})`);
+      }
+
+      console.log(`[MANUAL DEDUCTION] Deducting ₦${amount} from investment ${investmentId} (${purpose}). Current dynamic value: ₦${currentValue.toFixed(2)}`);
+
+      // NO NEED to update current_value in the database
+      // It will be calculated dynamically from the ledger entry we're about to create
+
+      // Log transaction - deduction entry (SOURCE OF TRUTH)
+      // This entry will be used by calculateCurrentValueFromLedger to determine the new value
+      await ledgerService.logTransaction({
+        userId: investment.user_id,
+        amount,
+        type: "deduction" as any,
+        sourceId: investmentId,
+        method: "admin_manual" as any,
+        description: `Manual deduction from investment: ${purpose}`,
+        metadata: {
+          deductionPurpose: purpose,
+          adminId,
+          deductionTime: new Date().toISOString(),
+        },
+      });
+
+      // Log audit action
+      await auditService.logAction({
+        adminId,
+        targetUserId: investment.user_id,
+        action: "manual_adjustment",
+        oldValues: {
+          currentValue: currentValue,
+          deductionAmount: amount,
+          deductionPurpose: purpose,
+        },
+        newValues: {
+          currentValue: currentValue - amount,
+          deductionAmount: amount,
+          deductionPurpose: purpose,
+        },
+      });
+
+      console.log(`[MANUAL DEDUCTION] ✓ Successfully deducted ₦${amount} from investment ${investmentId}. Current value will be recalculated from ledger.`);
+
+      // Return the investment with updated dynamic current_value
+      const updatedInvestment = await prisma.investment.findUnique({
+        where: { id: investmentId },
+      });
+
+      if (!updatedInvestment) {
+        throw new AppError(404, "Investment not found after deduction");
+      }
+
+      // Calculate and attach the new dynamic current value
+      const newDynamicValue = await this.calculateCurrentValueFromLedger(investmentId);
+      return {
+        ...updatedInvestment,
+        current_value: newDynamicValue,
+      } as unknown as Investment;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, "Failed to deduct from investment");
+    }
+  }
+
+  // Calculate investment current_value dynamically from transaction ledger
+  // This ensures current_value always reflects the actual financial state
+  // by reading from the source of truth (transaction history) rather than a denormalized field
+  private async calculateCurrentValueFromLedger(investmentId: string): Promise<number> {
+    try {
+      const investment = await prisma.investment.findUnique({
+        where: { id: investmentId },
+      });
+
+      if (!investment) {
+        throw new AppError(404, "Investment not found");
+      }
+
+      // For pending investments without a start_date, return the stored current_value (which is the principal amount)
+      if (!investment.start_date) {
+        console.log(`[CURRENT VALUE CALC] Investment ${investmentId} is pending (no start_date), returning stored value: ₦${investment.current_value}`);
+        return Number(investment.current_value) || Number(investment.amount);
+      }
+
+      // Get all transactions for this investment from the ledger
+      const transactions = await prisma.transactionLedger.findMany({
+        where: { source_id: investmentId },
+        orderBy: { created_at: "asc" },
+      });
+
+      // Determine principal (use initial_amount if set, else use amount)
+      const principal = Number(investment.initial_amount) || Number(investment.amount);
+
+      // Ensure start_date is a Date object
+      const startDate = investment.start_date instanceof Date 
+        ? investment.start_date 
+        : new Date(investment.start_date);
+
+      // Calculate months elapsed from start date to now
+      const monthsElapsed = getMonthsBetweenDates(startDate, new Date());
+
+      // Calculate interest earned based on payout frequency
+      let interestEarned = 0;
+
+      if (investment.payout_frequency === "reinvestment") {
+        // Compound interest: A = P(1 + r)^n
+        const monthlyRate = Number(investment.interest_rate) / 100;
+        const compoundedValue = principal * Math.pow(1 + monthlyRate, monthsElapsed);
+        interestEarned = Math.max(0, compoundedValue - principal);
+      } else {
+        // Simple interest (monthly or 6-month): A = P + (P × r × n)
+        const monthlyRate = Number(investment.interest_rate) / 100;
+        interestEarned = principal * monthlyRate * monthsElapsed;
+      }
+
+      // Sum all transaction impacts
+      // Deposits/interest increase value, withdrawals/deductions decrease it
+      // IMPORTANT: Skip the initial creation deposit (marked as "Investment created:...")
+      // because it's already counted in the principal
+      // ALSO: Skip "Investment payout marked" withdrawals if there's no corresponding actual withdrawal/transfer
+      let totalTransactionImpact = 0;
+
+      transactions.forEach((tx: any) => {
+        const amount = Number(tx.amount);
+
+        // Skip the initial investment creation transaction
+        if (tx.description && tx.description.includes("Investment created:")) {
+          console.log(`[CURRENT VALUE CALC] Skipping initial creation deposit: ₦${amount}`);
+          return;
+        }
+
+        // Skip payout marking withdrawals - these are just bookkeeping entries, not real deductions
+        // Real payouts to users would be tracked separately (e.g., bank transfers)
+        if (tx.type === "withdrawal" && tx.description && tx.description.includes("Investment payout marked")) {
+          console.log(`[CURRENT VALUE CALC] Skipping payout marking withdrawal: ₦${amount}`);
+          return;
+        }
+
+        if (tx.type === "deposit" || tx.type === "interest" || tx.type === "rollover") {
+          // Positive impact: investment received more funds (top-ups, interest reinvested, etc.)
+          totalTransactionImpact += amount;
+        } else if (tx.type === "withdrawal" || tx.type === "deduction" || tx.type === "charge" || tx.type === "adjustment") {
+          // Negative impact: investment reduced
+          // For adjustments: check metadata, but generally adjustments reduce value for this calculation
+          totalTransactionImpact -= amount;
+        }
+      });
+
+      console.log(`[CURRENT VALUE CALC] Investment ${investmentId}:`);
+      console.log(`  Principal: ₦${principal.toFixed(2)}`);
+      console.log(`  Months Elapsed: ${monthsElapsed}`);
+      console.log(`  Interest Earned: ₦${interestEarned.toFixed(2)} (${investment.payout_frequency})`);
+      console.log(`  Total Transaction Impact: ₦${totalTransactionImpact.toFixed(2)}`);
+
+      // Current value = Principal + Interest Earned + All Transactions
+      // Then subtract what's already been withdrawn/deducted
+      const currentValue = principal + interestEarned + totalTransactionImpact;
+
+      // Ensure never negative
+      const finalValue = Math.max(0, currentValue);
+
+      console.log(`  FINAL Current Value: ₦${finalValue.toFixed(2)}`);
+
+      return finalValue;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      console.error("[CURRENT VALUE CALC ERROR]", error);
+      throw new AppError(500, "Failed to calculate current value");
+    }
+  }
+
+  // Get current_value for an investment by reading from source (ledger + interest calculation)
+  async getCurrentValue(investmentId: string): Promise<number> {
+    return this.calculateCurrentValueFromLedger(investmentId);
   }
 }
 

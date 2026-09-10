@@ -12,22 +12,31 @@ export class EdgeFunctionService {
     try {
       const url = `${env.SUPABASE_URL}/functions/v1/${functionName}`;
       console.log(`[EDGE FUNCTION] Triggering ${functionName}...`);
+      console.log(`[EDGE FUNCTION] URL: ${url}`);
+      console.log(`[EDGE FUNCTION] Payload:`, JSON.stringify(payload, null, 2));
+      
       const response = (await fetch(url, {
         method: "POST",
         headers: this.getHeaders(),
         body: JSON.stringify(payload),
       })) as any;
 
+      console.log(`[EDGE FUNCTION] Response status: ${response.status}`);
+
       if (!response.ok) {
+        const errorText = await response.text();
         console.error(`[EDGE FUNCTION ERROR] ${functionName} responded with status: ${response.status}`);
-        return null;
+        console.error(`[EDGE FUNCTION ERROR] Response body:`, errorText);
+        throw new Error(`Edge function ${functionName} failed with status ${response.status}: ${errorText}`);
       }
 
-      return await response.json().catch(() => null);
+      const responseData = await response.json().catch(() => null);
+      console.log(`[EDGE FUNCTION] Response data:`, responseData);
+      return responseData;
     } catch (error: any) {
       console.error(`[EDGE FUNCTION ERROR] Failed to call ${functionName}:`, error.message);
-      // We do not throw so that it doesn't break main transaction execution if email/notification service fails
-      return null;
+      console.error(`[EDGE FUNCTION ERROR] Full error:`, error);
+      throw error;  // Throw so caller can handle it
     }
   }
 
@@ -89,6 +98,31 @@ export class EdgeFunctionService {
       to,
       subject: "Investment Rollover Confirmed",
       body: `Hello ${firstName},\n\nYour matured investment #${investmentId} has been successfully rolled over for another term of ${termMonths} months with a starting principal of ₦${amount}.\n\nThank you for choosing DPINES.`,
+    });
+  }
+
+  // Investment Payout Notification Email
+  async sendPayoutNotificationEmail(
+    to: string,
+    firstName: string,
+    payoutNumber: number,
+    payoutAmount: number,
+    payoutDate: string,
+    currentValue: number,
+    investmentId: string,
+    isReinvestment: boolean = false
+  ) {
+    const payoutType = isReinvestment ? "reinvested" : "credited to your account";
+    const formattedDate = new Date(payoutDate).toLocaleDateString('en-NG', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
+    return this.callFunction("send-communication", {
+      to,
+      subject: `Investment Payout #${payoutNumber} - ₦${payoutAmount.toLocaleString()}`,
+      body: `Hello ${firstName},\n\nYour payout for Investment #${investmentId} has been processed.\n\nPayout Details:\n• Payout Number: ${payoutNumber}\n• Amount: ₦${payoutAmount.toLocaleString()}\n• Date: ${formattedDate}\n• Type: ${payoutType}\n• Current Investment Value: ₦${currentValue.toLocaleString()}\n\nThank you for investing with DPINES.`,
     });
   }
 }

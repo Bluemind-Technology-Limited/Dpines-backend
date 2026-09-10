@@ -115,8 +115,18 @@ export const calculateInvestmentCurrentValue = (
 };
 
 export const getMonthsBetweenDates = (start: Date, end: Date): number => {
+  // Ensure inputs are Date objects
+  const startDate = start instanceof Date ? start : new Date(start);
+  const endDate = end instanceof Date ? end : new Date(end);
+  
+  // Validate dates
+  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+    console.error("[getMonthsBetweenDates] Invalid dates:", { start, end });
+    return 0;
+  }
+  
   return Math.floor(
-    (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24 * 30.44)
+    (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44)
   );
 };
 
