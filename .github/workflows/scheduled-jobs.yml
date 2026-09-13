@@ -12,18 +12,18 @@ jobs:
     steps:
       - name: Trigger Payment Reminders
         run: |
-          curl -X POST "${{ secrets.BACKEND_API_URL }}/api/jobs/trigger/payment_reminders" \
+          curl -X POST "https://dpines-backend.vercel.app/api/jobs/trigger/payment_reminders" \
             -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
             -H "Content-Type: application/json"
 
       - name: Trigger Late Fee Application
         run: |
-          curl -X POST "${{ secrets.BACKEND_API_URL }}/api/jobs/trigger/late_fees" \
+          curl -X POST "https://dpines-backend.vercel.app/api/jobs/trigger/late_fees" \
             -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
             -H "Content-Type: application/json"
 
       - name: Trigger Maturity Processing
         run: |
-          curl -X POST "${{ secrets.BACKEND_API_URL }}/api/jobs/trigger/maturity" \
+          curl -X POST "https://dpines-backend.vercel.app/api/jobs/trigger/maturity" \
             -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
             -H "Content-Type: application/json"
