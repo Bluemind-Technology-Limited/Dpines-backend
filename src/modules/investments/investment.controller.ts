@@ -19,9 +19,38 @@ export const createInvestment = asyncHandler(
     }
 
     const body = createInvestmentSchema.parse(req.body);
+    const userRole = (req.user as any).role?.toLowerCase() || "user";
+    const isAdmin = ["admin", "invest_admin"].includes(userRole);
+
+    // RIGID BUSINESS LOGIC:
+    // 1. Regular users can only create investments for themselves
+    // 2. Admins MUST provide userId in the request body
+    // 3. Admins cannot create investments for themselves
+
+    let investorId: string;
+
+    if (isAdmin) {
+      // Admin must explicitly provide userId
+      if (!body.userId) {
+        throw new AppError(400, "Admins must specify which user to create the investment for via userId parameter");
+      }
+
+      investorId = body.userId;
+
+      // Prevent admin from creating an investment for themselves
+      if (investorId === req.user.sub) {
+        throw new AppError(400, "Admins cannot create investments for themselves. Use the regular investment application form if you need a personal investment.");
+      }
+    } else {
+      // Regular user - can only apply for themselves
+      if (body.userId && body.userId !== req.user.sub) {
+        throw new AppError(403, "You can only create investments for yourself");
+      }
+      investorId = req.user.sub;
+    }
 
     const investment = await investmentService.createInvestment(
-      req.user.sub,
+      investorId,
       body.amount,
       body.interestRate,
       body.termMonths,

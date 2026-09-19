@@ -34,6 +34,9 @@ export const loanPaymentSchema = z.object({
 
 // Investment Validators
 export const createInvestmentSchema = z.object({
+  // userId: For admins only - specifies which user to create the investment for
+  // Regular users should NOT provide this - they apply for themselves
+  userId: z.string().uuid("Invalid user ID").optional(),
   amount: z.number().positive("Amount must be positive"),
   interestRate: z.number().min(0).max(100, "Interest rate must be between 0 and 100"),
   termMonths: z.number().int().min(1, "Term must be at least 1 month"),
