@@ -10,7 +10,22 @@ type TransactionType =
   | "withdrawal"     // Funds withdrawn
   | "rollover"       // Loan/investment rollover
   | "charge"         // Default/penalty charges
-  | "adjustment";    // Admin adjustment
+  | "adjustment"     // Admin adjustment
+  | "timeline_edit"  // Non-monetary: financial/timeline edit (start date, rate, term…)
+  | "status_change"  // Non-monetary: lifecycle status change
+  | "maturity_action"// Non-monetary: maturity action selected
+  | "topup_request"  // Non-monetary: top-up requested (pending)
+  | "topup_rejected";// Non-monetary: top-up rejected
+
+// Events with no money movement. They are recorded for a complete, auditable
+// history but must never affect balances.
+const NON_MONETARY_TYPES = new Set<TransactionType>([
+  "timeline_edit",
+  "status_change",
+  "maturity_action",
+  "topup_request",
+  "topup_rejected",
+]);
 
 type TransactionMethod = 
   | "internal"               // Internal transfer
@@ -55,8 +70,9 @@ export class LedgerService {
         throw new AppError(404, "User not found");
       }
 
-      // Validate amount
-      if (input.amount <= 0) {
+      // Validate amount - monetary movements must be positive; non-monetary
+      // events (timeline edits, status changes) carry amount 0.
+      if (input.amount < 0 || (input.amount === 0 && !NON_MONETARY_TYPES.has(input.type))) {
         throw new AppError(400, "Transaction amount must be positive");
       }
 
@@ -206,6 +222,19 @@ export class LedgerService {
       description: `Admin adjustment: ${reason}`,
       metadata: { adminId, reason, adjustmentType: "manual_override" },
     });
+  }
+
+  // Log a non-monetary event (timeline/financial edit, lifecycle status change,
+  // top-up request/rejection). Recorded for a complete history but never affects
+  // balances because it carries no money movement.
+  async logEvent(
+    userId: string,
+    sourceId: string,
+    type: TransactionType,
+    description: string,
+    method: TransactionMethod = "admin_manual"
+  ): Promise<TransactionLedgerEntry> {
+    return this.logTransaction({ userId, amount: 0, type, sourceId, method, description });
   }
 
   // Get user's transaction history

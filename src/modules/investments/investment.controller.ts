@@ -202,6 +202,13 @@ const rejectTopUpSchema = z.object({
   reason: z.string().min(1, "Rejection reason is required"),
 });
 
+// Admin immediate top-up: no approval and no receipt required
+const adminTopUpSchema = z.object({
+  amount: z.number().positive("Top-up amount must be positive"),
+  tenureExtensionType: z.enum(["maintain", "extend_6", "extend_12", "custom"]).default("maintain"),
+  customExtensionMonths: z.number().int().positive().optional(),
+});
+
 // Submit a top-up request (pending — requires admin approval)
 export const requestInvestmentTopUp = asyncHandler(
   async (req: Request, res: Response) => {
@@ -210,10 +217,13 @@ export const requestInvestmentTopUp = asyncHandler(
     }
     const { investmentId } = req.params;
     const body = topUpInvestmentSchema.parse(req.body);
+    const userRole = (req.user as any).role?.toLowerCase() || "user";
+    const isAdmin = ["admin", "invest_admin"].includes(userRole);
 
     const topUp = await investmentService.requestInvestmentTopUp(
       investmentId,
       req.user.sub,
+      isAdmin,
       body.amount,
       body.method,
       body.receiptUrl,
@@ -242,6 +252,27 @@ export const getInvestmentTopUps = asyncHandler(
   }
 );
 
+// Admin applies a top-up immediately (no approval / receipt required)
+export const adminApplyTopUp = asyncHandler(
+  async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new AppError(401, "Unauthorized");
+    }
+    const { investmentId } = req.params;
+    const body = adminTopUpSchema.parse(req.body);
+
+    const result = await investmentService.adminApplyTopUp(
+      investmentId,
+      req.user.sub,
+      body.amount,
+      body.tenureExtensionType,
+      body.customExtensionMonths
+    );
+
+    sendSuccess(res, result, "Top-up applied successfully", 201);
+  }
+);
+
 // Approve a pending top-up (admin)
 export const approveInvestmentTopUp = asyncHandler(
   async (req: Request, res: Response) => {
@@ -265,7 +296,8 @@ export const updateInvestmentFinancialsController = asyncHandler(
   async (req: Request, res: Response) => {
     const { investmentId } = req.params;
     const body = updateInvestmentFinancialsSchema.parse(req.body);
-    const result = await investmentService.updateInvestmentFinancials(investmentId, body);
+    const adminId = (req as any).user?.sub;
+    const result = await investmentService.updateInvestmentFinancials(investmentId, body, adminId);
     sendSuccess(res, result, "Investment financials updated successfully");
   }
 );

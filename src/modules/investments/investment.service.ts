@@ -165,10 +165,25 @@ export class InvestmentService {
         where: { id: investmentId },
         data: {
           status: "active" as any,
+          // Preserve the original principal as the interest basis on activation.
+          initial_amount: (investment as any).initial_amount ?? investment.amount,
           start_date,
           end_date,
-        },
+          updated_at: new Date(),
+        } as any,
       });
+
+      // Record the lifecycle change (non-monetary) so history is complete.
+      try {
+        await ledgerService.logEvent(
+          investment.user_id,
+          investmentId,
+          "status_change",
+          `Investment approved — active ${start_date.toISOString().slice(0, 10)} → ${end_date.toISOString().slice(0, 10)}`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log investment approval:", ledgerError);
+      }
 
       return approvedInvestment;
     } catch (error) {
@@ -199,8 +214,20 @@ export class InvestmentService {
         data: {
           status: "rejected" as any,
           rejection_reason: rejectionReason,
-        },
+          updated_at: new Date(),
+        } as any,
       });
+
+      try {
+        await ledgerService.logEvent(
+          investment.user_id,
+          investmentId,
+          "status_change",
+          `Investment rejected — ${rejectionReason}`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log investment rejection:", ledgerError);
+      }
 
       return rejectedInvestment;
     } catch (error) {
@@ -233,8 +260,20 @@ export class InvestmentService {
         where: { id: investmentId },
         data: {
           maturity_action: action,
-        },
+          updated_at: new Date(),
+        } as any,
       });
+
+      try {
+        await ledgerService.logEvent(
+          investment.user_id,
+          investmentId,
+          "maturity_action",
+          `Maturity action selected: ${action}`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log maturity action:", ledgerError);
+      }
 
       // Notify admin on maturity action asynchronously using Edge Function
       if (investment && !investment.maturity_action && action && (investment as any).users) {
@@ -261,7 +300,8 @@ export class InvestmentService {
   // The investment itself is NOT changed here.
   async requestInvestmentTopUp(
     investmentId: string,
-    userId: string,
+    requestingUserId: string,
+    isAdmin: boolean,
     amount: number,
     method: "bank_transfer" = "bank_transfer",
     receiptUrl: string,  // REQUIRED - no longer optional
@@ -300,10 +340,20 @@ export class InvestmentService {
         throw new AppError(400, "Investment is not active or has not started");
       }
 
+      // A regular user may only top up their own investment; an admin
+      // (admin / invest_admin) may initiate a top-up on the owner's behalf.
+      if (!isAdmin && investment.user_id !== requestingUserId) {
+        throw new AppError(403, "You can only top up your own investment");
+      }
+
+      // Always attribute the request to the investment owner, never to the
+      // admin who initiated it on the owner's behalf.
+      const ownerId = investment.user_id;
+
       const topUp = await prisma.investmentTopup.create({
         data: {
           investment_id: investmentId,
-          user_id: userId,
+          user_id: ownerId,
           amount,
           method,
           receipt_url: receiptUrl,
@@ -312,6 +362,17 @@ export class InvestmentService {
           custom_extension_months: customExtensionMonths || null,
         },
       });
+
+      try {
+        await ledgerService.logEvent(
+          ownerId,
+          investmentId,
+          "topup_request",
+          `Top-up requested — ₦${amount.toLocaleString()} (${tenureExtensionType})${receiptUrl ? ", receipt attached" : ""}`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log top-up request:", ledgerError);
+      }
 
       console.log(`[TOP-UP] Request created for investment ${investmentId} (amount ${amount}, extension: ${tenureExtensionType}, receipt provided)`);
       return topUp;
@@ -482,6 +543,88 @@ export class InvestmentService {
     }
   }
 
+  // Admin: apply a top-up immediately — no approval step and no receipt.
+  // Records an approved top-up row for history, then reuses the standard
+  // approval pipeline so the ledger, valuation and notifications stay identical.
+  async adminApplyTopUp(
+    investmentId: string,
+    adminId: string,
+    amount: number,
+    tenureExtensionType: string = "maintain",
+    customExtensionMonths?: number
+  ) {
+    try {
+      if (amount <= 0) {
+        throw new AppError(400, "Top-up amount must be positive");
+      }
+
+      const validExtensionTypes = ["maintain", "extend_6", "extend_12", "custom"];
+      if (!validExtensionTypes.includes(tenureExtensionType)) {
+        throw new AppError(400, "Invalid tenure extension type");
+      }
+      if (tenureExtensionType === "custom" && (!customExtensionMonths || customExtensionMonths <= 0)) {
+        throw new AppError(400, "Custom extension months must be positive");
+      }
+
+      const investment = await prisma.investment.findUnique({
+        where: { id: investmentId },
+      });
+
+      if (!investment) {
+        throw new AppError(404, "Investment not found");
+      }
+      if (investment.status !== "active" || !investment.start_date) {
+        throw new AppError(400, "Investment is not active or has not started");
+      }
+
+      // Record the top-up (attributed to the investment owner), then apply it
+      // through the same pipeline used for approved requests.
+      const topUp = await prisma.investmentTopup.create({
+        data: {
+          investment_id: investmentId,
+          user_id: investment.user_id,
+          amount,
+          method: "bank_transfer",
+          receipt_url: null,
+          status: "pending",
+          tenure_extension_type: tenureExtensionType,
+          custom_extension_months: customExtensionMonths || null,
+        },
+      });
+
+      let applied;
+      try {
+        applied = await this.approveInvestmentTopUp(topUp.id);
+      } catch (applyError) {
+        // Don't leave a dangling pending record if the application fails.
+        await prisma.investmentTopup.delete({ where: { id: topUp.id } }).catch(() => undefined);
+        throw applyError;
+      }
+
+      // Audit the admin action
+      try {
+        await auditService.logAction({
+          adminId,
+          targetUserId: investment.user_id,
+          action: "manual_adjustment",
+          newValues: {
+            investmentId,
+            topUpAmount: amount,
+            tenureExtensionType,
+            customExtensionMonths: customExtensionMonths || null,
+          },
+        });
+      } catch (auditError) {
+        console.error("[ADMIN TOP-UP] Failed to write audit log:", auditError);
+      }
+
+      return applied;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, "Failed to apply top-up");
+    }
+  }
+
   // Reject a pending top-up request
   async rejectInvestmentTopUp(topUpId: string, reason: string) {
     try {
@@ -504,6 +647,17 @@ export class InvestmentService {
           admin_notes: reason,
         },
       });
+
+      try {
+        await ledgerService.logEvent(
+          (topUp as any).user_id,
+          (topUp as any).investment_id,
+          "topup_rejected",
+          `Top-up request rejected — ₦${Number((topUp as any).amount).toLocaleString()} (${reason || "no reason"})`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log top-up rejection:", ledgerError);
+      }
 
       console.log(`[TOP-UP] Rejected ${topUpId}: ${reason || "no reason"}`);
       return rejectedTopUp;
@@ -627,8 +781,20 @@ export class InvestmentService {
         where: { id: investmentId },
         data: {
           status: "completed" as any,
-        },
+          updated_at: new Date(),
+        } as any,
       });
+
+      try {
+        await ledgerService.logEvent(
+          investment.user_id,
+          investmentId,
+          "status_change",
+          "Investment marked as completed"
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log investment completion:", ledgerError);
+      }
 
       return completedInvestment;
     } catch (error) {
@@ -1525,7 +1691,7 @@ export class InvestmentService {
     }
   }
 
-  async updateInvestmentFinancials(investmentId: string, updates: any) {
+  async updateInvestmentFinancials(investmentId: string, updates: any, adminId?: string) {
     const investment = await prisma.investment.findUnique({
       where: { id: investmentId },
     });
@@ -1575,7 +1741,11 @@ export class InvestmentService {
       if (startDate && principal && interestRate !== null && payoutFrequency) {
         // Calculate months elapsed from start date to now
         const startDt = startDate instanceof Date ? startDate : new Date(startDate);
-        const monthsElapsed = getMonthsBetweenDates(startDt, new Date());
+        const tenureMonths = updates.term_months !== undefined ? updates.term_months : investment.term_months;
+        const monthsElapsed = Math.max(
+          0,
+          Math.min(getMonthsBetweenDates(startDt, new Date()), tenureMonths || 0)
+        );
 
         // Calculate current value based on payout frequency type
         let calculatedCurrentValue = principal;
@@ -1596,10 +1766,68 @@ export class InvestmentService {
       }
     }
 
+    updatedData.updated_at = new Date();
+
     const result = await prisma.investment.update({
       where: { id: investmentId },
       data: updatedData,
     });
+
+    // Record the timeline/financial edit so the system can track it and respect
+    // it. This is append-only and non-monetary, so it never affects balances.
+    const before: Record<string, any> = {
+      start_date: investment.start_date,
+      end_date: investment.end_date,
+      interest_rate: investment.interest_rate,
+      term_months: investment.term_months,
+      amount: investment.amount,
+      current_value: investment.current_value,
+      status: investment.status,
+    };
+    const after: Record<string, any> = {
+      start_date: updatedData.start_date,
+      end_date: updatedData.end_date,
+      interest_rate: updatedData.interest_rate,
+      term_months: updatedData.term_months,
+      amount: updatedData.amount,
+      current_value: updatedData.current_value,
+      status: updatedData.status,
+    };
+
+    const changes: Record<string, { from: any; to: any }> = {};
+    for (const key of Object.keys(before)) {
+      if (after[key] === undefined) continue;
+      const fromVal = before[key] instanceof Date ? before[key].toISOString() : before[key];
+      const toVal = after[key] instanceof Date ? after[key].toISOString() : after[key];
+      if (String(fromVal) !== String(toVal)) changes[key] = { from: fromVal, to: toVal };
+    }
+
+    const changeSummary = Object.entries(changes)
+      .map(([field, v]) => `${field}: ${v.from} → ${v.to}`)
+      .join(", ") || "no field changes";
+
+    try {
+      await ledgerService.logEvent(
+        investment.user_id,
+        investmentId,
+        "timeline_edit",
+        `Financials edited by admin — ${changeSummary}`
+      );
+    } catch (ledgerError) {
+      console.error("[LEDGER] Failed to log financial edit:", ledgerError);
+    }
+
+    try {
+      await auditService.logAction({
+        adminId: adminId || (investment.user_id as any),
+        targetUserId: investment.user_id,
+        action: "investment_updated",
+        oldValues: before,
+        newValues: { ...after, changes },
+      });
+    } catch (auditError) {
+      console.error("[AUDIT] Failed to log financial edit:", auditError);
+    }
 
     return result;
   }
@@ -1752,21 +1980,54 @@ export class InvestmentService {
         ? investment.start_date 
         : new Date(investment.start_date);
 
-      // Calculate months elapsed from start date to now
-      const monthsElapsed = getMonthsBetweenDates(startDate, new Date());
+      // Accrue only up to the tenure end (end_date, or start + term_months). This
+      // keeps a back-dated start date from accruing interest beyond the term.
+      const now = new Date();
+      const tenureEnd = investment.end_date
+        ? new Date(investment.end_date)
+        : new Date(new Date(startDate).setMonth(new Date(startDate).getMonth() + (investment.term_months || 0)));
+      const accrualDate = now < tenureEnd ? now : tenureEnd;
+      const monthsElapsed = Math.max(
+        0,
+        Math.min(getMonthsBetweenDates(startDate, accrualDate), investment.term_months || 0)
+      );
 
-      // Calculate interest earned based on payout frequency
-      let interestEarned = 0;
+      // Approved top-ups are principal additions, but each one only earns from the
+      // payout period it falls into onward — never retroactively. Because the
+      // period is derived from the payout dates, editing the start date moves the
+      // top-ups with the timeline instead of rewriting past periods.
+      const topUps = transactions.filter(
+        (tx: any) => tx.type === "deposit" && tx.description && tx.description.includes("Investment Top-Up")
+      );
+      const topUpPrincipal = topUps.reduce((sum: number, tx: any) => sum + Number(tx.amount), 0);
+      const investedPrincipal = principal + topUpPrincipal;
 
-      if (investment.payout_frequency === "reinvestment") {
-        // Compound interest: A = P(1 + r)^n
-        const monthlyRate = Number(investment.interest_rate) / 100;
-        const compoundedValue = principal * Math.pow(1 + monthlyRate, monthsElapsed);
-        interestEarned = Math.max(0, compoundedValue - principal);
-      } else {
-        // Simple interest (monthly or 6-month): A = P + (P × r × n)
-        const monthlyRate = Number(investment.interest_rate) / 100;
-        interestEarned = principal * monthlyRate * monthsElapsed;
+      const monthlyRate = Number(investment.interest_rate) / 100;
+      const accrue = (base: number, months: number): number => {
+        if (months <= 0) return 0;
+        if (investment.payout_frequency === "reinvestment") {
+          // Compound: A = P(1 + r)^n
+          return Math.max(0, base * Math.pow(1 + monthlyRate, months) - base);
+        }
+        // Simple: A = P × r × n
+        return base * monthlyRate * months;
+      };
+      // Months a top-up has been earning, based on how many payout periods were
+      // already due when it was added.
+      const activeMonthsFor = (addedAt: Date): number => {
+        let periodsDue = 0;
+        for (let k = 1; k <= (investment.term_months || 0); k++) {
+          const pd = new Date(startDate);
+          pd.setMonth(pd.getMonth() + k);
+          if (pd <= addedAt) periodsDue++;
+          else break;
+        }
+        return Math.max(0, monthsElapsed - periodsDue);
+      };
+
+      let interestEarned = accrue(principal, monthsElapsed);
+      for (const tx of topUps) {
+        interestEarned += accrue(Number((tx as any).amount), activeMonthsFor(new Date((tx as any).created_at)));
       }
 
       // Sum all transaction impacts
@@ -1792,6 +2053,12 @@ export class InvestmentService {
           return;
         }
 
+        // Skip top-up deposits - they are already counted in investedPrincipal,
+        // so including them again here would double-count the top-up.
+        if (tx.type === "deposit" && tx.description && tx.description.includes("Investment Top-Up")) {
+          return;
+        }
+
         if (tx.type === "deposit" || tx.type === "interest" || tx.type === "rollover") {
           // Positive impact: investment received more funds (top-ups, interest reinvested, etc.)
           totalTransactionImpact += amount;
@@ -1803,14 +2070,13 @@ export class InvestmentService {
       });
 
       console.log(`[CURRENT VALUE CALC] Investment ${investmentId}:`);
-      console.log(`  Principal: ₦${principal.toFixed(2)}`);
+      console.log(`  Principal: ₦${principal.toFixed(2)} (+ top-ups ₦${topUpPrincipal.toFixed(2)} = ₦${investedPrincipal.toFixed(2)})`);
       console.log(`  Months Elapsed: ${monthsElapsed}`);
       console.log(`  Interest Earned: ₦${interestEarned.toFixed(2)} (${investment.payout_frequency})`);
       console.log(`  Total Transaction Impact: ₦${totalTransactionImpact.toFixed(2)}`);
 
-      // Current value = Principal + Interest Earned + All Transactions
-      // Then subtract what's already been withdrawn/deducted
-      const currentValue = principal + interestEarned + totalTransactionImpact;
+      // Current value = invested principal + interest earned + other transactions
+      const currentValue = investedPrincipal + interestEarned + totalTransactionImpact;
 
       // Ensure never negative
       const finalValue = Math.max(0, currentValue);

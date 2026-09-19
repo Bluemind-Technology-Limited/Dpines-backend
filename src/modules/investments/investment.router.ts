@@ -19,6 +19,7 @@ import {
   sendPayoutNotification,
   markInvestmentPayoutController,
   manualDeductController,
+  adminApplyTopUp,
 } from "./investment.controller.js";
 import { verifySupabaseToken, requireAuth, requireRole } from "../../middlewares/auth.middleware.js";
 
@@ -44,6 +45,8 @@ router.get("/:investmentId", getInvestmentById);
 router.post("/:investmentId/maturity-action", setMaturityAction);
 router.put("/:investmentId/update-value", updateInvestmentValue);
 router.post("/:investmentId/top-up", requestInvestmentTopUp);
+// Admin immediate top-up — applied without approval or receipt
+router.post("/:investmentId/admin-top-up", requireRole(["admin", "invest_admin"]), adminApplyTopUp);
 router.post("/:investmentId/payouts/notify", sendPayoutNotification);
 router.post("/:investmentId/payouts", markInvestmentPayoutController);
 router.post("/:investmentId/deduct", manualDeductController);
