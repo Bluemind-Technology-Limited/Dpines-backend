@@ -13,6 +13,7 @@ interface DeductionHistoryEntry {
   allocatedFees: number;
   allocatedPrincipal: number;
   reason: string;
+  description?: string;
   processedBy: string;
   processedAt: Date;
   ledgerId?: string;
@@ -102,56 +103,48 @@ export class LedgerReconciliationService {
     };
   }> {
     try {
-      // Get deduction transactions for this loan
-      const [deductions, total] = await Promise.all([
+      // Return every ledger entry scoped to this loan — repayments (deposit), late
+      // fees (charge), rollovers, admin corrections and non-monetary timeline/
+      // status events — so the loan's history is complete. Money movements are
+      // never filtered out.
+      const [entries, total] = await Promise.all([
         prisma.transactionLedger.findMany({
-          where: {
-            source_id: loanId,
-            type: {
-              in: ["deduction", "charge", "rollover"] as any
-            },
-          },
+          where: { source_id: loanId },
           orderBy: { created_at: "desc" },
           take: limit,
           skip: offset,
         }),
-        prisma.transactionLedger.count({
-          where: {
-            source_id: loanId,
-            type: {
-              in: ["deduction", "charge", "rollover"] as any
-            },
-          },
-        }),
+        prisma.transactionLedger.count({ where: { source_id: loanId } }),
       ]);
 
-      const entries: DeductionHistoryEntry[] = deductions.map((d: any) => ({
+      const deductions: DeductionHistoryEntry[] = entries.map((d: any) => ({
         id: d.id,
         loanId: loanId,
-        investmentId: d.metadata?.investmentId || "",
+        investmentId: "",
         userId: d.user_id,
         amount: Number(d.amount),
-        allocatedInterest: d.metadata?.allocatedInterest || 0,
-        allocatedFees: d.metadata?.allocatedFees || 0,
-        allocatedPrincipal: d.metadata?.allocatedPrincipal || 0,
-        reason: d.description,
-        processedBy: d.metadata?.processedBy || "system",
+        allocatedInterest: 0,
+        allocatedFees: 0,
+        allocatedPrincipal: 0,
+        reason: d.description || "",
+        description: d.description || "",
+        processedBy: "system",
         processedAt: d.created_at,
         ledgerId: d.id,
         type: d.type,
         method: d.method,
       }));
 
-      const totalDeducted = entries.reduce((sum, d) => sum + d.amount, 0);
-      const averageDeduction = entries.length > 0 ? totalDeducted / entries.length : 0;
+      const totalDeducted = deductions.reduce((sum, d) => sum + d.amount, 0);
+      const averageDeduction = deductions.length > 0 ? totalDeducted / deductions.length : 0;
 
       return {
-        deductions: entries,
+        deductions,
         total,
         summary: {
           totalDeducted,
           averageDeduction,
-          deductionCount: entries.length,
+          deductionCount: deductions.length,
         },
       };
     } catch (error) {

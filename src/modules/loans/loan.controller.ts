@@ -289,7 +289,8 @@ export const updateLoanFinancialsController = asyncHandler(
   async (req: Request, res: Response) => {
     const { loanId } = req.params;
     const body = updateLoanFinancialsSchema.parse(req.body);
-    const result = await loanService.updateLoanFinancials(loanId, body);
+    const adminId = (req.user as any)?.sub;
+    const result = await loanService.updateLoanFinancials(loanId, body, adminId);
     sendSuccess(res, result, "Loan financials updated successfully");
   }
 );

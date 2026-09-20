@@ -237,15 +237,15 @@ class JobsService {
     }
   }
 
-  // Execute Late Fee Application Job - Called by cron job - actually applies late fees - Algorithm: - 1. Find all active loans with next_due_date < now (overdue) - 2. For each loan: - a. Get last fee application date from ledger - b. Skip if already charged today (duplicate prevention) - c. Calculate: monthlyPayment * (1% per day overdue, max 7 days) - d. Apply fee via loanService.applyLateFeeWithNotification() - e. Log transaction + audit - 3. Send admin summary notification - 4. Return: {processed, failed, totalFeesAmount, details}
+  // Execute Late Fee Application Job - Called by cron job - actually applies late fees - Algorithm: - 1. Find all active/overdue loans with next_due_date < now (overdue) - 2. For each loan, delegate to loanService.accrueOverdueCharges() (the single source of the daily-charge rule) - 3. Send admin summary notification - 4. Return: {processed, failed, totalFeesAmount, details}
   async executeLateFeeApplication(): Promise<JobResult> {
     try {
       const now = new Date();
 
-      // Find all active loans where next_due_date is in the past
+      // Overdue loans include ones already flagged `overdue` — not just `active`.
       const overdueLoans = await (prisma.loan as any).findMany({
         where: {
-          status: "active",
+          status: { in: ["active", "overdue"] },
           next_due_date: {
             lt: now,
           },
@@ -262,71 +262,39 @@ class JobsService {
         daysOverdue: number;
       }> = [];
 
-      // Apply late fees to each overdue loan
-      for (let loan of overdueLoans) {
+      // Apply the default-penalty cycles to each overdue loan
+      for (const overdueLoan of overdueLoans) {
         try {
-          // Check if fee already applied for today
-          const feeAlreadyApplied = await this.checkDailyFeeApplied(loan.id);
-          if (feeAlreadyApplied) {
-            continue;
-          }
+          // Single source of truth for the monthly 7-day cycle rule. Returns the
+          // penalty charged during this run (0 when no cycle was due).
+          const feeApplied = await loanService.accrueOverdueCharges(overdueLoan.id);
 
-          let nextDueDate = new Date(loan.next_due_date);
-          let daysOverdue = Math.floor(
-            (now.getTime() - nextDueDate.getTime()) / (1000 * 60 * 60 * 24)
-          );
+          const refreshed = await prisma.loan.findUnique({
+            where: { id: overdueLoan.id },
+          });
+          const nextDueDate = (refreshed as any)?.next_due_date
+            ? new Date((refreshed as any).next_due_date)
+            : null;
+          const daysOverdue = nextDueDate
+            ? Math.max(
+                0,
+                Math.floor((now.getTime() - nextDueDate.getTime()) / (1000 * 60 * 60 * 24))
+              )
+            : 0;
 
-          let totalAccruedFee = 0;
-
-          // Process 7-day rollover cycles (Capitalization & Term extension)
-          while (daysOverdue >= 7) {
-            const currentRolled = Number(loan.rolled_balance || 0);
-            const baseAmount = Number(loan.amount) + Number(loan.total_interest) + currentRolled;
-            const feeToCapitalize = baseAmount * 0.07;
-            await loanService.capitalizeAndRollOverLoan(
-              loan.id,
-              Math.round(feeToCapitalize * 100) / 100
-            );
-
-            // Fetch updated loan state for subsequent iterations
-            const updatedLoan = await prisma.loan.findUnique({
-              where: { id: loan.id },
-            });
-            if (!updatedLoan) break;
-            loan = updatedLoan;
-
-            nextDueDate = new Date(loan.next_due_date);
-            daysOverdue = Math.floor(
-              (now.getTime() - nextDueDate.getTime()) / (1000 * 60 * 60 * 24)
-            );
-          }
-
-          // Apply remaining daily default charges (overdue days < 7)
-          if (daysOverdue > 0) {
-            const currentRolled = Number(loan.rolled_balance || 0);
-            const baseAmount = Number(loan.amount) + Number(loan.total_interest) + currentRolled;
-            const feeAmount = baseAmount * (daysOverdue * 0.01);
-            await loanService.applyLateFeeWithNotification(
-              loan.id,
-              Math.round(feeAmount * 100) / 100, // Round to 2 decimals
-              daysOverdue
-            );
-            totalAccruedFee += feeAmount;
-          }
-
-          totalFeesApplied += totalAccruedFee;
+          totalFeesApplied += feeApplied;
           successCount++;
 
           processedLoans.push({
-            loanId: loan.id,
-            borrowerId: loan.user_id,
-            feeApplied: Math.round(totalAccruedFee * 100) / 100,
+            loanId: overdueLoan.id,
+            borrowerId: (overdueLoan as any).user_id,
+            feeApplied: Math.round(feeApplied * 100) / 100,
             daysOverdue,
           });
         } catch (error) {
           failedCount++;
           console.error(
-            `Failed to apply late fees for loan ${loan.id}:`,
+            `Failed to apply late fees for loan ${overdueLoan.id}:`,
             error
           );
         }
@@ -537,32 +505,6 @@ class JobsService {
         message: "Failed to schedule database keep-alive job",
         error: error instanceof Error ? error.message : String(error),
       };
-    }
-  }
-
-  // Check if daily fee already applied for a loan - Prevents duplicate fee application in same calendar day
-  private async checkDailyFeeApplied(loanId: string): Promise<boolean> {
-    try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      const recentFee = await (prisma.transactionLedger as any).findFirst({
-        where: {
-          source_id: loanId,
-          type: "charge",
-          created_at: {
-            gte: today,
-          },
-        },
-        orderBy: {
-          created_at: "desc",
-        },
-      });
-
-      return !!recentFee;
-    } catch (error) {
-      // If check fails, assume fee not applied (better to apply than skip)
-      return false;
     }
   }
 

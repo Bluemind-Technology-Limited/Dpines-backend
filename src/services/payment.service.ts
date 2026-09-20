@@ -2,6 +2,7 @@
 
 import prisma from "../configs/database.js";
 import { AppError } from "../middlewares/error.middleware.js";
+import { ledgerService } from "./ledger.service.js";
 
 type LoanStatus = "pending" | "active" | "completed" | "overdue" | "rejected";
 
@@ -11,6 +12,7 @@ interface PaymentCalculation {
   monthlyInterest: number;
   interestPaid: number;
   feesPaid: number;
+  rolledPaid: number;
   principalReduction: number;
   newPrincipalBalance: number;
   newStatus: LoanStatus;
@@ -23,7 +25,8 @@ export class PaymentService {
     loanId: string,
     paymentAmount: number,
     monthlyInterest: number,
-    totalDue: number
+    totalDue: number,
+    client: any = prisma
   ): Promise<{
     isPartial: boolean;
     rolledBalance: number;
@@ -31,7 +34,7 @@ export class PaymentService {
     termExtension: number;
   }> {
     try {
-      const loan = await prisma.loan.findUnique({
+      const loan = await client.loans.findUnique({
         where: { id: loanId },
       });
 
@@ -57,34 +60,58 @@ export class PaymentService {
         );
       }
 
-      // Calculate rolled balance (unpaid principal from this month)
+      // Calculate rolled balance (unpaid portion of this period). It ACCUMULATES
+      // onto any previously rolled amount — a new shortfall must never erase an
+      // earlier one.
       const principalDue = totalDue - monthlyInterest;
-      const rolledBalance = principalDue - Math.max(0, paymentAmount - monthlyInterest);
+      const paidBeyondInterest = Math.max(0, paymentAmount - monthlyInterest);
+      const shortfall = Math.max(0, principalDue - paidBeyondInterest);
 
       // monthly_rate = monthly_rate_percent / 100 (Prisma returns snake_case)
       const monthlyRate = Number((loan as any).interest_rate) / 100;
-      const compoundedInterest = rolledBalance * monthlyRate;
+      const compoundedInterest = shortfall * monthlyRate;
+
+      const currentRolledBalance = Number((loan as any).rolled_balance || 0);
+      const newRolledBalance = currentRolledBalance + shortfall;
+      const currentCompounded = Number((loan as any).compounded_interest || 0);
+      const newCompoundedInterest = currentCompounded + compoundedInterest;
 
       // Update loan for rollover
       const currentRolloverCount = (loan as any).rollover_count || 0;
       const newRolloverCount = currentRolloverCount + 1;
       const termExtension = 1; // Extend by 1 month for each partial payment
+      const newTerm = (loan as any).term_months + termExtension;
 
-      await prisma.loan.update({
+      await client.loans.update({
         where: { id: loanId },
         data: {
-          rolled_balance: Number(rolledBalance),
-          compounded_interest: Number((loan as any).compounded_interest || 0) + compoundedInterest,
-          term_months: (loan as any).term_months + termExtension,
+          rolled_balance: Number(newRolledBalance),
+          compounded_interest: Number(newCompoundedInterest),
+          term_months: newTerm,
           last_rollover_date: new Date(),
           rollover_count: newRolloverCount,
         },
       });
 
+      // Record the rollover in the ledger so the source of truth reflects it and
+      // startup reconciliation (syncRolloverBalances) stays consistent.
+      try {
+        await ledgerService.logRollover(
+          (loan as any).user_id,
+          loanId,
+          Number(shortfall.toFixed(2)),
+          "loan",
+          `Shortfall of ₦${shortfall.toFixed(2)} rolled over; term extended to ${newTerm} months.`,
+          client
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log partial rollover:", ledgerError);
+      }
+
       return {
         isPartial: true,
-        rolledBalance,
-        compoundedInterest,
+        rolledBalance: newRolledBalance,
+        compoundedInterest: newCompoundedInterest,
         termExtension,
       };
     } catch (error) {
@@ -120,14 +147,16 @@ export class PaymentService {
     return { lateDays, lateFee: Math.round(lateFee * 100) / 100 };
   }
 
-  // Allocate payment amount across interest, fees, and principal - Priority: Interest → Late Fees → Principal
+  // Allocate a repayment: interest → accrued penalty → carried balance → principal - Priority ensures interest and penalties are settled before principal is reduced
   allocatePayment(
     paymentAmount: number,
     monthlyInterest: number,
-    lateFee: number
+    lateFee: number,
+    rolledBalance: number = 0
   ): {
     interestPaid: number;
     feesPaid: number;
+    rolledPaid: number;
     principalReduction: number;
   } {
     let remaining = paymentAmount;
@@ -136,16 +165,21 @@ export class PaymentService {
     const interestPaid = Math.min(remaining, monthlyInterest);
     remaining -= interestPaid;
 
-    // Second: Pay late fees
+    // Second: Pay accrued late fees
     const feesPaid = Math.min(remaining, lateFee);
     remaining -= feesPaid;
 
-    // Third: Reduce principal
+    // Third: Pay down the carried balance (capitalized default penalties)
+    const rolledPaid = Math.min(remaining, Math.max(0, rolledBalance));
+    remaining -= rolledPaid;
+
+    // Fourth: Reduce principal
     const principalReduction = remaining;
 
     return {
       interestPaid: Math.round(interestPaid * 100) / 100,
       feesPaid: Math.round(feesPaid * 100) / 100,
+      rolledPaid: Math.round(rolledPaid * 100) / 100,
       principalReduction: Math.round(principalReduction * 100) / 100,
     };
   }
@@ -172,9 +206,10 @@ export class PaymentService {
     // Find next unmarked month
     for (let month = paymentMonth + 1; month <= (loan as any).term_months; month++) {
       if (!allMarked.includes(month)) {
+        // Same convention as the repayment schedule: month k falls on
+        // start_date + k months, preserving the day-of-month.
         const nextDueDate = new Date(baseDate);
         nextDueDate.setMonth(nextDueDate.getMonth() + month);
-        nextDueDate.setDate(1); // First day of month
         return nextDueDate;
       }
     }
@@ -188,11 +223,12 @@ export class PaymentService {
     loanId: string,
     paymentAmount: number,
     paymentDate: Date,
-    monthNumber: number
+    monthNumber: number,
+    client: any = prisma
   ): Promise<PaymentCalculation> {
     try {
       // Get loan
-      const loan = await prisma.loan.findUnique({
+      const loan = await client.loans.findUnique({
         where: { id: loanId },
       });
 
@@ -224,8 +260,14 @@ export class PaymentService {
         Number((loan as any).interest_rate)
       );
 
-      // Calculate total due including compounded interest from rollover
+      // Penalties already accrued by the daily job are what is genuinely owed —
+      // the payment pays THOSE down, never a freshly re-estimated fee. This keeps
+      // the payment waterfall in step with what was actually charged.
+      const accruedPenalty = Number((loan as any).default_charge_accrued || 0);
       const compoundedInterest = Number((loan as any).compounded_interest || 0);
+      // The penalty is intentionally NOT part of the rollover "due": it stays in
+      // default_charge_accrued to be settled, so it cannot be rolled into
+      // rolled_balance as well (which would double-count it).
       const totalDue = this.calculateTotalDue(monthlyInterest, compoundedInterest);
 
       // Check for partial payment and process rollover if needed
@@ -235,23 +277,25 @@ export class PaymentService {
           loanId,
           paymentAmount,
           monthlyInterest,
-          totalDue
+          totalDue,
+          client
         );
       }
 
-      // Calculate late fee if applicable
+      // Days late is recorded on the payment for history only.
       const expectedDueDate = (loan as any).next_due_date || new Date();
-      const { lateDays, lateFee } = this.calculateLateFee(
+      const { lateDays } = this.calculateLateFee(
         monthlyInterest,
         expectedDueDate,
         paymentDate
       );
 
-      // Allocate payment
-      const { interestPaid, feesPaid, principalReduction } = this.allocatePayment(
+      // Allocate payment: interest → accrued penalty → carried balance → principal
+      const { interestPaid, feesPaid, rolledPaid, principalReduction } = this.allocatePayment(
         paymentAmount,
         monthlyInterest,
-        lateFee
+        accruedPenalty,
+        Number((loan as any).rolled_balance || 0)
       );
 
       // Calculate new principal balance (ensure it doesn't go negative)
@@ -271,12 +315,15 @@ export class PaymentService {
         newMarkedPayments.push(monthNumber);
       }
 
-      // Calculate new status
+      // Calculate new status. A full, on-time payment recovers an overdue loan
+      // back to active; completion is the only terminal state here.
       let newStatus: LoanStatus = (loan as any).status as LoanStatus;
       if (finalPrincipalBalance === 0) {
         newStatus = "completed";
       } else if (lateDays > 0) {
         newStatus = "overdue";
+      } else {
+        newStatus = "active";
       }
 
       // Calculate next due date
@@ -288,10 +335,11 @@ export class PaymentService {
 
       return {
         lateFeeDays: lateDays,
-        lateFee,
+        lateFee: accruedPenalty,
         monthlyInterest,
         interestPaid,
         feesPaid,
+        rolledPaid,
         principalReduction,
         newPrincipalBalance: finalPrincipalBalance,
         newStatus,
@@ -308,10 +356,11 @@ export class PaymentService {
     loanId: string,
     calculation: PaymentCalculation,
     monthNumber: number,
-    _principalBefore: number
+    _principalBefore: number,
+    client: any = prisma
   ): Promise<any> {
     try {
-      const loan = await prisma.loan.findUnique({
+      const loan = await client.loans.findUnique({
         where: { id: loanId },
       });
 
@@ -328,7 +377,7 @@ export class PaymentService {
       }
 
       // Update loan with new values
-      const updatedLoan = await prisma.loan.update({
+      const updatedLoan = await client.loans.update({
         where: { id: loanId },
         data: {
           principal_balance: calculation.newPrincipalBalance,
@@ -337,12 +386,22 @@ export class PaymentService {
           // NOTE: Number(...) is required — Prisma Decimal.valueOf() returns a
           // string, so Decimal + number would string-concatenate.
           amount_paid: Number((loan as any).amount_paid || 0) + calculation.interestPaid + calculation.feesPaid + calculation.principalReduction,
-          default_charge_accrued:
-            Number((loan as any).default_charge_accrued || 0) + calculation.feesPaid,
+          // Fees that were just paid REDUCE the outstanding penalty. They must
+          // not be re-accrued, otherwise a settled penalty comes back forever.
+          default_charge_accrued: Math.max(
+            0,
+            Number((loan as any).default_charge_accrued || 0) - calculation.feesPaid
+          ),
           status: calculation.newStatus as any,
           marked_payments: markedPayments,
           next_due_date: calculation.nextDueDate,
           last_payment_date: new Date(),
+          // Carried penalties are settled by the repayment (they are no longer
+          // left stranded once capitalised).
+          rolled_balance: Math.max(
+            0,
+            Number((loan as any).rolled_balance || 0) - calculation.rolledPaid
+          ),
           // Heal missing start_date for legacy loans so future approvals work
           start_date: (loan as any).start_date ?? (loan as any).created_at,
         },

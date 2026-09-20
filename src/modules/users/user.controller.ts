@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { userService } from "./user.service.js";
 import { sendSuccess, sendPaginated, asyncHandler } from "../../lib/utils.js";
 import { AppError } from "../../middlewares/error.middleware.js";
-import { updateProfileSchema } from "../../lib/validators.js";
+import { updateProfileSchema, updateUserProfileAdminSchema } from "../../lib/validators.js";
 
 export const getProfile = asyncHandler(async (req: Request, res: Response) => {
   if (!req.user) {
@@ -101,6 +101,20 @@ export const updateUserRole = asyncHandler(
     const user = await userService.updateUserRole(userId, role);
 
     sendSuccess(res, user, "User role updated successfully");
+  }
+);
+
+// Admin: update any user's profile — names, contact, avatar, metadata, role and
+// the active-investor flag (which determines the 10% loan rate).
+export const updateUserProfileAdmin = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { userId } = req.params;
+    const body = updateUserProfileAdminSchema.parse(req.body);
+    const adminId = (req.user as any)?.sub;
+
+    const user = await userService.updateUserProfileAdmin(userId, body, adminId);
+
+    sendSuccess(res, user, "User profile updated successfully");
   }
 );
 

@@ -85,8 +85,6 @@ app.use((req: Request, res: Response) => {
 // Error Handler (must be last)
 app.use(errorHandler);
 
-import { loanService } from "./modules/loans/loan.service.js";
-
 // Start server
 const PORT = env.PORT;
 const server = app.listen(PORT, async () => {
@@ -97,16 +95,12 @@ const server = app.listen(PORT, async () => {
   // Wait a moment for database connection to establish
   await new Promise(resolve => setTimeout(resolve, 1000));
 
-  // Sync historical rollover balances in background on startup
-  (async () => {
-    try {
-      await loanService.syncRolloverBalances();
-      console.log("✓ Rollover balances synced successfully");
-    } catch (err) {
-      console.error("Failed to run startup rollover balance sync:", err);
-      // Don't fail the server startup if sync fails
-    }
-  })();
+  // NOTE: the previous startup job recomputed every loan's rolled_balance from
+  // its rollover ledger entries. It is intentionally disabled: rollovers now
+  // update rolled_balance and write their ledger entry atomically at the moment
+  // they happen, and the startup pass would silently overwrite any manual
+  // correction an admin made through Edit Financials. The ledger remains the
+  // audit trail; the stored balance is no longer rebuilt behind the user's back.
 
   // Seed default admin account created template if it doesn't exist
   try {

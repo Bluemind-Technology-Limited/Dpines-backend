@@ -88,6 +88,19 @@ export const createAdvertSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
+// Admin-only update of any user's profile, including role and the
+// active-investor flag that determines the 10% loan rate.
+export const updateUserProfileAdminSchema = z.object({
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
+  phoneNumber: z.string().optional(),
+  address: z.string().optional(),
+  avatarUrl: z.string().optional(),
+  metadata: z.record(z.unknown()).optional(),
+  role: z.enum(["user", "admin", "loans_admin", "invest_admin", "support"]).optional(),
+  isActiveInvestor: z.boolean().optional(),
+});
+
 export const updateAdvertSchema = createAdvertSchema.partial();
 
 // Pagination Validator
@@ -101,17 +114,25 @@ export type CreateLoanInput = z.infer<typeof createLoanSchema>;
 export type CreateInvestmentInput = z.infer<typeof createInvestmentSchema>;
 export type CreateTicketInput = z.infer<typeof createTicketSchema>;
 
+// Every field is optional so an edit can update just one value; the service
+// re-derives dependent fields (end_date, monthly_payment, total_interest,
+// next_due_date) so the record always stays internally consistent.
 export const updateLoanFinancialsSchema = z.object({
-  amount: z.number().positive(),
-  principal_balance: z.number().nonnegative(),
-  interest_rate: z.number().nonnegative(),
-  start_date: z.string().or(z.date()),
+  amount: z.number().positive().optional(),
+  principal_balance: z.number().nonnegative().optional(),
+  interest_rate: z.number().min(0).max(100, "Interest rate must be between 0 and 100").optional(),
+  start_date: z.string().or(z.date()).optional(),
   term_months: z.number().int().positive().optional(),
   end_date: z.string().or(z.date()).nullable().optional(),
-  status: z.string().optional(),
+  status: z
+    .enum(["pending", "approved", "active", "overdue", "completed", "rejected"])
+    .optional(),
   monthly_payment: z.number().nonnegative().optional(),
+  total_interest: z.number().nonnegative().optional(),
+  amount_paid: z.number().nonnegative().optional(),
   rolled_balance: z.number().nonnegative().optional(),
   compounded_interest: z.number().nonnegative().optional(),
+  next_due_date: z.string().or(z.date()).nullable().optional(),
 });
 
 export const updateInvestmentFinancialsSchema = z.object({

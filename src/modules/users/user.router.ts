@@ -7,6 +7,7 @@ import {
   getAllUsers,
   searchUsers,
   updateUserRole,
+  updateUserProfileAdmin,
   getUsersStats,
   createUserByAdmin,
 } from "./user.controller.js";
@@ -29,6 +30,7 @@ router.get("/", requireRole(["admin"]), getAllUsers);
 router.get("/search", requireRole(["admin"]), searchUsers);
 router.get("/stats", requireRole(["admin"]), getUsersStats);
 router.get("/:userId", requireRole(["admin"]), getUserById);
+router.put("/:userId", requireRole(["admin"]), updateUserProfileAdmin);
 router.put("/:userId/role", requireRole(["admin"]), updateUserRole);
 
 export default router;

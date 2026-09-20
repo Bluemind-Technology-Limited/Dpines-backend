@@ -15,7 +15,9 @@ type TransactionType =
   | "status_change"  // Non-monetary: lifecycle status change
   | "maturity_action"// Non-monetary: maturity action selected
   | "topup_request"  // Non-monetary: top-up requested (pending)
-  | "topup_rejected";// Non-monetary: top-up rejected
+  | "topup_rejected" // Non-monetary: top-up rejected
+  | "payment_recorded"  // Non-monetary: repayment recorded (awaiting approval)
+  | "payment_rejected"; // Non-monetary: repayment rejected
 
 // Events with no money movement. They are recorded for a complete, auditable
 // history but must never affect balances.
@@ -25,6 +27,8 @@ const NON_MONETARY_TYPES = new Set<TransactionType>([
   "maturity_action",
   "topup_request",
   "topup_rejected",
+  "payment_recorded",
+  "payment_rejected",
 ]);
 
 type TransactionMethod = 
@@ -59,10 +63,14 @@ interface TransactionLedgerEntry {
 
 export class LedgerService {
   // Log a transaction to the ledger - Every financial movement MUST go through this
-  async logTransaction(input: CreateTransactionInput): Promise<TransactionLedgerEntry> {
+  //
+  // `client` may be the shared client or a `$transaction` client, so a ledger
+  // entry can be written inside the same transaction as the balance change it
+  // describes (they can never drift apart).
+  async logTransaction(input: CreateTransactionInput, client: any = prisma): Promise<TransactionLedgerEntry> {
     try {
       // Verify user exists
-      const user = await prisma.userProfile.findUnique({
+      const user = await client.user_profiles.findUnique({
         where: { id: input.userId },
       });
 
@@ -77,7 +85,7 @@ export class LedgerService {
       }
 
       // Create transaction entry
-      const transaction = await prisma.transactionLedger.create({
+      const transaction = await client.transaction_ledger.create({
         data: {
           user_id: input.userId,
           amount: input.amount,
@@ -101,7 +109,8 @@ export class LedgerService {
     userId: string,
     loanId: string,
     amount: number,
-    method: TransactionMethod = "bank_transfer"
+    method: TransactionMethod = "bank_transfer",
+    client: any = prisma
   ): Promise<TransactionLedgerEntry> {
     return this.logTransaction({
       userId,
@@ -111,7 +120,7 @@ export class LedgerService {
       method,
       description: `Loan payment received for loan ${loanId}`,
       metadata: { loanId, paymentType: "installment" },
-    });
+    }, client);
   }
 
   // Log investment deduction (investment → loan repayment)
@@ -119,7 +128,8 @@ export class LedgerService {
     userId: string,
     investmentId: string,
     loanId: string,
-    amount: number
+    amount: number,
+    client: any = prisma
   ): Promise<TransactionLedgerEntry> {
     return this.logTransaction({
       userId,
@@ -129,7 +139,7 @@ export class LedgerService {
       method: "contribution_deduction",
       description: `Investment deduction of $${amount} from investment ${investmentId} to repay loan ${loanId}`,
       metadata: { investmentId, loanId, deductionType: "loan_repayment" },
-    });
+    }, client);
   }
 
   // Log default charge (late payment penalty)
@@ -174,7 +184,8 @@ export class LedgerService {
     sourceId: string,
     amount: number,
     rolloverType: "loan" | "investment",
-    reason: string
+    reason: string,
+    client: any = prisma
   ): Promise<TransactionLedgerEntry> {
     return this.logTransaction({
       userId,
@@ -184,7 +195,7 @@ export class LedgerService {
       method: "system_generated",
       description: `${rolloverType} rollover for ${sourceId}: ${reason}`,
       metadata: { rolloverType, reason },
-    });
+    }, client);
   }
 
   // Log withdrawal

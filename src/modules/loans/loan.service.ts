@@ -14,6 +14,103 @@ import { auditService } from "../../services/audit.service.js";
 import notificationService from "../notifications/notification.service.js";
 import { edgeFunctionService } from "../../services/edge-function.service.js";
 
+const LOAN_STATUS_VALUES: readonly string[] = [
+  "pending",
+  "approved",
+  "active",
+  "overdue",
+  "completed",
+  "rejected",
+];
+
+const round2 = (value: number): number => Math.round(value * 100) / 100;
+
+// Add whole calendar months to a date, preserving the day-of-month. This is the
+// same convention the repayment schedule uses (month k falls on start + k).
+const addMonths = (date: Date, months: number): Date => {
+  const result = new Date(date);
+  result.setMonth(result.getMonth() + months);
+  return result;
+};
+
+const addDays = (date: Date, days: number): Date => {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+};
+
+// Total interest implied by the repayment schedule: simulate a declining balance
+// where each month charges interest on the outstanding principal and the fixed
+// installment reduces it. This mirrors how a loan is priced at application time
+// (the frontend's computeLoanSchedule), so editing the terms reproduces the same
+// figure the borrower originally saw — never the flat `amount × rate × term`.
+const computeScheduledTotalInterest = (
+  principal: number,
+  monthlyPayment: number,
+  ratePercent: number,
+  termMonths: number
+): number => {
+  const rate = ratePercent / 100;
+  let balance = principal;
+  let totalInterest = 0;
+
+  for (let month = 1; month <= termMonths; month++) {
+    const interest = round2(balance * rate);
+    totalInterest += interest;
+
+    if (month === termMonths) break;
+    if (monthlyPayment < interest) break; // installment cannot even cover interest
+
+    const principalReduction = Math.min(monthlyPayment - interest, balance);
+    balance = round2(balance - principalReduction);
+  }
+
+  return round2(totalInterest);
+};
+
+const parseLoanDate = (value: unknown, field: string): Date | null => {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = value instanceof Date ? value : new Date(value as string);
+  if (isNaN(parsed.getTime())) {
+    throw new AppError(400, `Invalid ${field}`);
+  }
+  return parsed;
+};
+
+// Derive the next outstanding installment date: the first scheduled month that
+// is neither already marked as paid nor already covered by an in-flight payment
+// (recorded / pending / approved). Mirrors the schedule convention used by the
+// frontend so the two never disagree.
+async function computeLoanNextDueDate(
+  loanId: string,
+  startDate: Date | null,
+  termMonths: number,
+  markedPayments: unknown
+): Promise<Date | null> {
+  if (!startDate || !termMonths) return null;
+
+  const marked = new Set<number>(
+    Array.isArray(markedPayments) ? (markedPayments as number[]) : []
+  );
+
+  const inFlight = await prisma.loan_payments.findMany({
+    where: {
+      loan_id: loanId,
+      payment_month: { not: null },
+      status: { not: "rejected" },
+    },
+    select: { payment_month: true },
+  });
+  const spokenFor = new Set<number>(inFlight.map((p: any) => Number(p.payment_month)));
+
+  for (let month = 1; month <= termMonths; month++) {
+    if (!marked.has(month) && !spokenFor.has(month)) {
+      return addMonths(startDate, month);
+    }
+  }
+  return null;
+}
+
 export class LoanService {
   async createLoan(
     userId: string,
@@ -54,6 +151,18 @@ export class LoanService {
         },
       });
 
+      // Append-only history: every action is recorded, not just money movements.
+      try {
+        await ledgerService.logEvent(
+          userId,
+          loan.id,
+          "status_change",
+          `Loan application created — ₦${amount.toLocaleString()} at ${interestRate}% for ${termMonths} months`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log loan creation:", ledgerError);
+      }
+
       return loan as unknown as Loan;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -63,6 +172,10 @@ export class LoanService {
 
   async getLoanById(loanId: string): Promise<Loan | null> {
     try {
+      // Reflect any overdue penalties before returning the record so the loan's
+      // stored balances always match reality (idempotent — at most once a day).
+      await this.accrueOverdueCharges(loanId);
+
       const loan = await prisma.loan.findUnique({
         where: { id: loanId },
         include: {
@@ -74,6 +187,138 @@ export class LoanService {
       return loan as unknown as Loan | null;
     } catch (error) {
       throw new AppError(500, "Failed to fetch loan");
+    }
+  }
+
+  // Accrue overdue penalties for a loan. Agreed rule:
+  //   • The due date never moves — the loan stays overdue until it is paid.
+  //   • ONE 7-day penalty cycle is charged per month, anchored to the due date's
+  //     day-of-month (due on the 10th → the 7-day window 11th–17th; then the
+  //     following month's 11th–17th; and so on).
+  //   • Each cycle charges 7% of everything owed (initial principal + total
+  //     interest + already-carried penalties), so it COMPOUNDS month over month.
+  //   • The monthly repayment is re-derived upward so the enlarged balance still
+  //     clears within the term.
+  //   • Once the loan is past its final scheduled month, each further cycle rolls
+  //     the term forward (month 6 → 7 → 8 …) until the loan is fully paid.
+  //
+  // `last_default_charge_date` stores the anniversary of the last charged cycle,
+  // which makes catch-up exact and idempotent (a cycle is never charged twice).
+  // Returns the total penalty charged during this call (0 when nothing was due).
+  async accrueOverdueCharges(loanId: string): Promise<number> {
+    try {
+      const initial = await prisma.loan.findUnique({ where: { id: loanId } });
+      if (!initial) return 0;
+      const seed = initial as any;
+
+      if (!["active", "overdue"].includes(seed.status)) return 0;
+      if (Number(seed.principal_balance ?? seed.amount) <= 0) return 0;
+      if (!seed.next_due_date) return 0;
+
+      const now = new Date();
+      const startOfToday = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+      );
+
+      // Fixed anchor — the due date is never advanced by a default.
+      const anchor = new Date(seed.next_due_date);
+
+      // The first 7-day window (day after due → +7 days) must have elapsed.
+      if (addDays(anchor, 7) > startOfToday) return 0;
+
+      let lastCharged: Date | null = seed.last_default_charge_date
+        ? new Date(seed.last_default_charge_date)
+        : null;
+
+      let applied = 0;
+      let totalCharged = 0;
+      const MAX_CYCLES = 240;
+
+      for (let k = 0; k < MAX_CYCLES; k++) {
+        const anniversary = addMonths(anchor, k);
+        const windowEnd = addDays(anniversary, 7);
+        if (windowEnd > startOfToday) break;
+        if (lastCharged && anniversary <= lastCharged) continue;
+
+        // Reload so each cycle compounds on the latest carried balance.
+        const current = await prisma.loan.findUnique({ where: { id: loanId } });
+        if (!current) return totalCharged;
+        const rec = current as any;
+
+        const amount = Number(rec.amount);
+        const totalInterest = Number(rec.total_interest);
+        const carried = Number(rec.rolled_balance || 0);
+        const principal = Number(rec.principal_balance ?? amount);
+        const rate = Number(rec.interest_rate);
+
+        // One 7-day cycle = 7% of everything owed, compounded into the carried
+        // balance so next month's cycle is charged on a larger amount.
+        const cycleFee = round2((amount + totalInterest + carried) * 0.07);
+        if (cycleFee <= 0) continue;
+        const newRolled = round2(carried + cycleFee);
+
+        // Roll the term forward only once we are past the final scheduled month.
+        let newTerm = Number(rec.term_months);
+        let newEndDate: Date | null = rec.end_date ? new Date(rec.end_date) : null;
+        if (newEndDate && startOfToday > newEndDate) {
+          newTerm = newTerm + 1;
+          newEndDate = addMonths(newEndDate, 1);
+        }
+        newTerm = Math.max(1, newTerm);
+
+        // Raise the monthly repayment so the enlarged balance still clears.
+        const newMonthlyPayment = round2(
+          calculateMonthlyPayment(principal + newRolled, rate, newTerm)
+        );
+
+        await prisma.loan.update({
+          where: { id: loanId },
+          data: {
+            rolled_balance: newRolled,
+            term_months: newTerm,
+            ...(newEndDate && { end_date: newEndDate }),
+            monthly_payment: newMonthlyPayment,
+            status: "overdue" as any,
+            last_default_charge_date: anniversary,
+          },
+        });
+
+        try {
+          await ledgerService.logRollover(
+            rec.user_id,
+            loanId,
+            cycleFee,
+            "loan",
+            `Monthly default penalty of ₦${cycleFee.toLocaleString()} (7-day cycle ending ${windowEnd
+              .toISOString()
+              .slice(0, 10)}) capitalized into the carried balance.`
+          );
+        } catch (ledgerError) {
+          console.error("[LEDGER] Failed to log default cycle:", ledgerError);
+        }
+
+        lastCharged = anniversary;
+        totalCharged = round2(totalCharged + cycleFee);
+        applied++;
+      }
+
+      if (applied > 0) {
+        try {
+          await notificationService.notifyDefaultFeeCharged(
+            loanId,
+            totalCharged,
+            7,
+            "1% per day × 7 days"
+          );
+        } catch (notifError) {
+          console.error("[NOTIFY] Failed to send late fee notification:", notifError);
+        }
+      }
+
+      return totalCharged;
+    } catch (error) {
+      console.error(`[ACCRUAL] Failed to accrue overdue charges for loan ${loanId}:`, error);
+      return 0;
     }
   }
 
@@ -147,12 +392,11 @@ export class LoanService {
       }
 
       const startDate = new Date();
-      const endDate = new Date();
-      endDate.setMonth(endDate.getMonth() + (loan as any).term_months);
-
-      const nextDueDate = new Date();
-      nextDueDate.setMonth(nextDueDate.getMonth() + 1);
-      nextDueDate.setDate(1); // Set to first day of next month
+      // Follow the repayment-schedule convention: month k is due at
+      // start_date + k months, preserving the day-of-month. Do NOT snap to the
+      // 1st of the month — a loan starting on the 19th is due on the 19th.
+      const endDate = addMonths(startDate, (loan as any).term_months);
+      const nextDueDate = addMonths(startDate, 1);
 
       const approvedLoan = await prisma.loan.update({
         where: { id: loanId },
@@ -177,6 +421,17 @@ export class LoanService {
         ).catch((err) => {
           console.error("Failed to trigger loan approved email edge function:", err);
         });
+      }
+
+      try {
+        await ledgerService.logEvent(
+          (loan as any).user_id,
+          loanId,
+          "status_change",
+          `Loan approved — active ${startDate.toISOString().slice(0, 10)} → ${endDate.toISOString().slice(0, 10)}`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log loan approval:", ledgerError);
       }
 
       return approvedLoan as unknown as Loan;
@@ -207,6 +462,17 @@ export class LoanService {
           rejection_reason: rejectionReason,
         },
       });
+
+      try {
+        await ledgerService.logEvent(
+          (loan as any).user_id,
+          loanId,
+          "status_change",
+          `Loan rejected — ${rejectionReason || "no reason provided"}`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log loan rejection:", ledgerError);
+      }
 
       return rejectedLoan as unknown as Loan;
     } catch (error) {
@@ -243,6 +509,17 @@ export class LoanService {
         },
       });
 
+      try {
+        await ledgerService.logEvent(
+          (loan as any).user_id,
+          loanId,
+          "payment_recorded",
+          `Repayment of ₦${amount.toLocaleString()} recorded for month ${monthNumber} (${paymentMethod.replace(/_/g, " ")}) — awaiting approval`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log recorded payment:", ledgerError);
+      }
+
       return payment as unknown as LoanPayment;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -251,107 +528,103 @@ export class LoanService {
   }
 
   async approveLoanPayment(paymentId: string): Promise<LoanPayment> {
+    // ---- Up-front reads/validation (cheap failures don't open a transaction) ----
+    const payment = await prisma.loanPayment.findUnique({
+      where: { id: paymentId },
+    });
+
+    if (!payment) {
+      console.log(`[APPROVE PAYMENT] ✗ Payment ${paymentId} not found`);
+      throw new AppError(404, "Payment not found");
+    }
+
+    if ((payment as any).status !== "recorded") {
+      console.log(
+        `[APPROVE PAYMENT] ✗ Payment ${paymentId} status is "${(payment as any).status}", expected "recorded"`
+      );
+      throw new AppError(400, "Payment is not in recorded status");
+    }
+
+    // loan_payments stores the installment as payment_month (not monthNumber)
+    const paymentMonth = (payment as any).payment_month ?? (payment as any).monthNumber;
+    const paymentMethod = (payment as any).payment_method || "bank_transfer";
+
     try {
-      const payment = await prisma.loanPayment.findUnique({
-        where: { id: paymentId },
-      });
+      // -------------------------------------------------------------------
+      // ONE transaction. The loan balances, the payment record, the ledger
+      // entries and — for a contribution deduction — the investment debits all
+      // commit together or not at all. Nothing can end up half-applied.
+      // -------------------------------------------------------------------
+      const { approvedPayment, calculation, loan } = await prisma.$transaction(
+        async (tx: any) => {
+          const loan = await tx.loans.findUnique({
+            where: { id: (payment as any).loan_id },
+            include: { users: true },
+          });
 
-      if (!payment) {
-        console.log(`[APPROVE PAYMENT] ✗ Payment ${paymentId} not found`);
-        throw new AppError(404, "Payment not found");
-      }
+          if (!loan) {
+            throw new AppError(404, "Loan not found");
+          }
 
-      console.log(`[APPROVE PAYMENT] Payment found:`, {
-        id: payment.id,
-        loan_id: (payment as any).loan_id,
-        user_id: (payment as any).user_id,
-        amount: String((payment as any).amount),
-        method: (payment as any).payment_method,
-        status: (payment as any).status,
-        payment_month: (payment as any).payment_month,
-        submitted_at: (payment as any).submitted_at,
-      });
+          // Compute against the transactional snapshot, then apply.
+          const calculation = await paymentService.processLoanPayment(
+            (payment as any).loan_id,
+            Number((payment as any).amount),
+            new Date(),
+            paymentMonth,
+            tx
+          );
 
-      if ((payment as any).status !== "recorded") {
-        console.log(`[APPROVE PAYMENT] ✗ Payment ${paymentId} status is "${(payment as any).status}", expected "recorded"`);
-        throw new AppError(400, "Payment is not in recorded status");
-      }
+          await paymentService.applyPaymentToLoan(
+            (payment as any).loan_id,
+            calculation,
+            paymentMonth,
+            Number((loan as any).principal_balance),
+            tx
+          );
 
-      // Get the loan (Prisma returns snake_case field names: loan_id)
-      const loan = await prisma.loan.findUnique({
-        where: { id: (payment as any).loan_id },
-        include: {
-          users: true,
+          const approvedPayment = await tx.loan_payments.update({
+            where: { id: paymentId },
+            data: {
+              status: "approved" as any,
+              late_days: calculation.lateFeeDays,
+              default_fee: calculation.feesPaid,
+              principal_reduction: calculation.principalReduction,
+              pre_principal: (loan as any).principal_balance,
+              post_principal: calculation.newPrincipalBalance,
+              approved_at: new Date(),
+            },
+          });
+
+          // Ledger entry for the repayment, written inside the same transaction
+          // so it can never drift from the balance change.
+          await ledgerService.logLoanPaymentReceived(
+            (loan as any).user_id,
+            (payment as any).loan_id,
+            Number((payment as any).amount),
+            paymentMethod,
+            tx
+          );
+
+          // Contribution deduction: debit the borrower's active investments in
+          // the SAME transaction, so the loan and the investments cannot diverge.
+          if (paymentMethod === "contribution_deduction") {
+            await this.applyInvestmentDeduction(
+              (payment as any).user_id,
+              (payment as any).loan_id,
+              Number((payment as any).amount),
+              tx
+            );
+          }
+
+          return { approvedPayment, calculation, loan };
         },
-      });
-
-      if (!loan) {
-        console.log(`[APPROVE PAYMENT] ✗ Loan ${(payment as any).loan_id} not found`);
-        throw new AppError(404, "Loan not found");
-      }
-
-      console.log(`[APPROVE PAYMENT] Loan found:`, {
-        id: loan.id,
-        borrower: (loan as any).users ? `${(loan as any).users.first_name} ${(loan as any).users.last_name}`.trim() : "?",
-        status: (loan as any).status,
-        principal_balance: String((loan as any).principal_balance),
-        amount_paid: String((loan as any).amount_paid),
-        total_interest: String((loan as any).total_interest),
-        term_months: (loan as any).term_months,
-        interest_rate: String((loan as any).interest_rate),
-        start_date: (loan as any).start_date,
-        next_due_date: (loan as any).next_due_date,
-        marked_payments: (loan as any).marked_payments,
-        rolled_balance: String((loan as any).rolled_balance ?? 0),
-        compounded_interest: String((loan as any).compounded_interest ?? 0),
-      });
-
-      // Process payment with advanced calculations
-      // loan_payments stores the installment as payment_month (not monthNumber)
-      const paymentMonth = (payment as any).payment_month ?? (payment as any).monthNumber;
-
-      const paymentCalculation = await paymentService.processLoanPayment(
-        (payment as any).loan_id,
-        (payment as any).amount,
-        (payment as any).paymentDate || new Date(),
-        paymentMonth
+        { timeout: 20000 }
       );
 
-      console.log(`[APPROVE PAYMENT] Calculation:`, {
-        month: paymentMonth,
-        lateFeeDays: paymentCalculation.lateFeeDays,
-        monthlyInterest: paymentCalculation.monthlyInterest,
-        interestPaid: paymentCalculation.interestPaid,
-        feesPaid: paymentCalculation.feesPaid,
-        principalReduction: paymentCalculation.principalReduction,
-        newPrincipalBalance: paymentCalculation.newPrincipalBalance,
-        newStatus: paymentCalculation.newStatus,
-        nextDueDate: paymentCalculation.nextDueDate,
-      });
-
-      // Apply payment to loan
-      await paymentService.applyPaymentToLoan(
-        (payment as any).loan_id,
-        paymentCalculation,
-        paymentMonth,
-        (loan as any).principal_balance
-      );
-
-      // Update payment status
-      const approvedPayment = await prisma.loanPayment.update({
-        where: { id: paymentId },
-        data: {
-          status: "approved" as any,
-          late_days: paymentCalculation.lateFeeDays,
-          default_fee: paymentCalculation.feesPaid,
-          principal_reduction: paymentCalculation.principalReduction,
-          pre_principal: (loan as any).principal_balance,
-          post_principal: paymentCalculation.newPrincipalBalance,
-          approved_at: new Date(),
-        },
-      });
-
-      // Send repayment processed email asynchronously using Edge Function
+      // -------------------------------------------------------------------
+      // Side effects — AFTER the commit, never inside the transaction.
+      // -------------------------------------------------------------------
       if ((loan as any).users) {
         const user = (loan as any).users;
         edgeFunctionService.sendRepaymentProcessedEmail(
@@ -360,35 +633,12 @@ export class LoanService {
           Number((payment as any).amount),
           (payment as any).payment_month || 1,
           loan.id,
-          Number(paymentCalculation.newPrincipalBalance)
+          Number(calculation.newPrincipalBalance)
         ).catch((err) => {
           console.error("Failed to trigger repayment processed email edge function:", err);
         });
       }
 
-      // Log transaction: Payment received (audit trail — must not fail the approval)
-      try {
-        await ledgerService.logLoanPaymentReceived(
-          (loan as any).user_id,
-          (payment as any).loan_id,
-          (payment as any).amount,
-          ((payment as any).payment_method as any) || "bank_transfer"
-        );
-
-        // Log default charge if applicable
-        if (paymentCalculation.lateFeeDays > 0 && paymentCalculation.feesPaid > 0) {
-          await ledgerService.logDefaultCharge(
-            (loan as any).user_id,
-            (payment as any).loan_id,
-            paymentCalculation.feesPaid,
-            paymentCalculation.lateFeeDays
-          );
-        }
-      } catch (ledgerError) {
-        console.error("Failed to write transaction ledger after payment approval:", ledgerError);
-      }
-
-      // Send payment confirmation notification
       try {
         await notificationService.createNotification({
           userId: (loan as any).user_id,
@@ -399,27 +649,12 @@ export class LoanService {
           metadata: {
             loanId: (payment as any).loan_id,
             paymentAmount: (payment as any).amount,
-            paymentDate: approvedPayment.approved_at,
-            remainingBalance: paymentCalculation.newPrincipalBalance,
+            paymentDate: (approvedPayment as any).approved_at,
+            remainingBalance: calculation.newPrincipalBalance,
           },
         });
       } catch (notifError) {
         console.error("Failed to send payment confirmation notification:", notifError);
-      }
-
-      // Contribution deduction: move funds from the borrower's active investment(s)
-      // to cover this payment (FIFO, oldest first) and record the deduction ledger
-      // entries so they appear in the investment's transaction history.
-      if (((payment as any).payment_method || "bank_transfer") === "contribution_deduction") {
-        try {
-          await this.applyInvestmentDeduction(
-            (payment as any).user_id,
-            (payment as any).loan_id,
-            Number((payment as any).amount)
-          );
-        } catch (deductionError) {
-          console.error("[APPROVE PAYMENT] Investment deduction failed:", deductionError);
-        }
       }
 
       console.log(`[APPROVE PAYMENT] ✓ Payment ${paymentId} approved successfully`);
@@ -456,6 +691,17 @@ export class LoanService {
         },
       });
 
+      try {
+        await ledgerService.logEvent(
+          (payment as any).user_id,
+          (payment as any).loan_id,
+          "payment_rejected",
+          `Repayment of ₦${Number((payment as any).amount).toLocaleString()} rejected — ${rejectionReason || "no reason provided"}`
+        );
+      } catch (ledgerError) {
+        console.error("[LEDGER] Failed to log rejected payment:", ledgerError);
+      }
+
       return rejectedPayment as unknown as LoanPayment;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -466,8 +712,8 @@ export class LoanService {
   // Deduct from the borrower's active investments (FIFO, oldest first) to cover a
   // contribution-deduction payment, and record each deduction in the transaction
   // ledger (feeds the investment's transaction history).
-  async applyInvestmentDeduction(userId: string, loanId: string, amount: number) {
-    const investments = await prisma.investment.findMany({
+  async applyInvestmentDeduction(userId: string, loanId: string, amount: number, client: any = prisma) {
+    const investments = await client.investments.findMany({
       where: { user_id: userId, status: "active" },
       orderBy: { start_date: "asc" },
     });
@@ -482,9 +728,9 @@ export class LoanService {
 
       const deductAmount = Math.min(remainingAmount, currentValue);
 
-      await ledgerService.logInvestmentDeduction(userId, investment.id, loanId, deductAmount);
+      await ledgerService.logInvestmentDeduction(userId, investment.id, loanId, deductAmount, client);
 
-      await prisma.investment.update({
+      await client.investments.update({
         where: { id: investment.id },
         data: { current_value: currentValue - deductAmount },
       });
@@ -502,81 +748,94 @@ export class LoanService {
 
   async processDeduction(loanId: string, amount: number) {
     try {
-      const loan = await prisma.loan.findUnique({
-        where: { id: loanId },
-        include: {
-          users: true,
-        },
-      });
-
-      if (!loan) {
-        throw new AppError(404, "Loan not found");
-      }
-
-      // Find active investments to deduct from (oldest first)
-      const investments = await prisma.investment.findMany({
-        where: {
-          user_id: (loan as any).user_id,
-          status: "active",
-        },
-        orderBy: {
-          start_date: "asc",
-        },
-      });
-
-      let remainingAmount = amount;
-
-      for (const investment of investments) {
-        if (remainingAmount <= 0) break;
-
-        const deductAmount = Math.min(remainingAmount, Number((investment as any).current_value));
-
-        // Log transaction: Investment deduction
-        await ledgerService.logInvestmentDeduction(
-          (loan as any).user_id,
-          investment.id,
-          loanId,
-          deductAmount
-        );
-
-        // Update investment current value
-        await prisma.investment.update({
-          where: { id: investment.id },
-          data: {
-            current_value: Number((investment as any).current_value) - deductAmount,
-          },
-        });
-
-        remainingAmount -= deductAmount;
-      }
-
-      // Update loan
-      if (remainingAmount < amount) {
-        const deductedAmount = amount - remainingAmount;
-        const newPrincipalBalance = Math.max(0, Number((loan as any).principal_balance) - deductedAmount);
-
-        const updatedLoan = await prisma.loan.update({
+      // One transaction: the investment debits, the loan update and the ledger
+      // entries commit together or not at all.
+      return await prisma.$transaction(async (tx: any) => {
+        const loan = await tx.loans.findUnique({
           where: { id: loanId },
-          data: {
-            principal_balance: newPrincipalBalance,
-            amount_paid: (Number((loan as any).amount_paid) || 0) + deductedAmount,
-            status:
-              newPrincipalBalance === 0 ? ("completed" as any) : (loan as any).status,
+          include: {
+            users: true,
           },
         });
 
-        return {
-          success: true,
-          deductedAmount,
-          remainingAmount,
-          loan: updatedLoan,
-        };
-      }
+        if (!loan) {
+          throw new AppError(404, "Loan not found");
+        }
 
-      throw new AppError(
-        400,
-        "Insufficient investment balance for deduction"
-      );
+        // Find active investments to deduct from (oldest first)
+        const investments = await tx.investments.findMany({
+          where: {
+            user_id: (loan as any).user_id,
+            status: "active",
+          },
+          orderBy: {
+            start_date: "asc",
+          },
+        });
+
+        let remainingAmount = amount;
+
+        for (const investment of investments) {
+          if (remainingAmount <= 0) break;
+
+          const deductAmount = Math.min(remainingAmount, Number((investment as any).current_value));
+
+          // Log transaction: Investment deduction
+          await ledgerService.logInvestmentDeduction(
+            (loan as any).user_id,
+            investment.id,
+            loanId,
+            deductAmount,
+            tx
+          );
+
+          // Update investment current value
+          await tx.investments.update({
+            where: { id: investment.id },
+            data: {
+              current_value: Number((investment as any).current_value) - deductAmount,
+            },
+          });
+
+          remainingAmount -= deductAmount;
+        }
+
+        // Update loan
+        if (remainingAmount < amount) {
+          const deductedAmount = amount - remainingAmount;
+          const newPrincipalBalance = Math.max(0, Number((loan as any).principal_balance) - deductedAmount);
+
+          const updatedLoan = await tx.loans.update({
+            where: { id: loanId },
+            data: {
+              principal_balance: newPrincipalBalance,
+              amount_paid: (Number((loan as any).amount_paid) || 0) + deductedAmount,
+              status:
+                newPrincipalBalance === 0 ? ("completed" as any) : (loan as any).status,
+            },
+          });
+
+          // Loan-side record of the repayment (the investment-side deduction is
+          // logged separately), so the loan ledger reflects the money received.
+          await ledgerService.logTransaction({
+            userId: (loan as any).user_id,
+            amount: deductedAmount,
+            type: "deposit",
+            sourceId: loanId,
+            method: "contribution_deduction",
+            description: `Loan repayment of ₦${deductedAmount.toLocaleString()} via contribution deduction`,
+          }, tx);
+
+          return {
+            success: true,
+            deductedAmount,
+            remainingAmount,
+            loan: updatedLoan,
+          };
+        }
+
+        throw new AppError(400, "Insufficient investment balance for deduction");
+      }, { timeout: 20000 });
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw new AppError(500, "Failed to process deduction");
@@ -1026,8 +1285,6 @@ export class LoanService {
         throw new AppError(404, "Loan not found");
       }
 
-      const oldPrincipal = Number(loan.principal_balance !== undefined ? loan.principal_balance : loan.amount);
-      const newPrincipal = oldPrincipal + feeAmount;
       const oldTerm = loan.term_months;
       const newTerm = oldTerm + 1;
 
@@ -1036,18 +1293,48 @@ export class LoanService {
       const newDueDate = new Date(currentDueDate);
       newDueDate.setMonth(newDueDate.getMonth() + 1);
 
-
       const oldRolledBalance = Number((loan as any).rolled_balance || 0);
       const newRolledBalance = oldRolledBalance + feeAmount;
+
+      // The capitalized fee moves OUT of the accrued-penalty column and INTO the
+      // carried balance. It is deliberately NOT added to principal_balance — that
+      // would double-count it. The accrued column is reduced rather than zeroed
+      // so unrelated fees are preserved.
+      const oldAccruedFees = Number((loan as any).default_charge_accrued || 0);
+      const newAccruedFees = Math.max(0, oldAccruedFees - feeAmount);
+
+      // Re-derive the installment so the repayment reflects the larger amount
+      // owed. Re-amortised over the remaining (pre-extension) term so defaulting
+      // genuinely raises the monthly repayment, as the business requires.
+      const paidPeriods = Array.isArray((loan as any).marked_payments)
+        ? (loan as any).marked_payments.length
+        : 0;
+      const remainingForPayment = Math.max(1, oldTerm - paidPeriods);
+      const principalForPayment =
+        Number((loan as any).principal_balance ?? (loan as any).amount) + newRolledBalance;
+      const newMonthlyPayment = round2(
+        calculateMonthlyPayment(
+          principalForPayment,
+          Number((loan as any).interest_rate),
+          remainingForPayment
+        )
+      );
+      const newTotalInterest = computeScheduledTotalInterest(
+        Number((loan as any).amount),
+        newMonthlyPayment,
+        Number((loan as any).interest_rate),
+        newTerm
+      );
 
       await prisma.loan.update({
         where: { id: loanId },
         data: {
-          principal_balance: newPrincipal,
           term_months: newTerm,
           next_due_date: newDueDate,
-          default_charge_accrued: 0,
+          default_charge_accrued: newAccruedFees,
           rolled_balance: newRolledBalance,
+          monthly_payment: newMonthlyPayment,
+          total_interest: newTotalInterest,
         },
       });
 
@@ -1057,23 +1344,27 @@ export class LoanService {
         loanId,
         feeAmount,
         "loan",
-        `Capitalized default charge of ₦${feeAmount} into principal. Term extended to ${newTerm} months.`
+        `Capitalized default charge of ₦${feeAmount} into the carried balance. Term extended to ${newTerm} months.`
       );
 
-      // Create audit log
+      // Create audit log (system actor → the audit service resolves a real admin)
       await auditService.logAction({
-        adminId: "00000000-0000-0000-0000-000000000000",
+        adminId: "system",
         targetUserId: (loan as any).user_id,
         action: "loan_updated",
         oldValues: {
-          principal_balance: oldPrincipal,
           term_months: oldTerm,
           next_due_date: loan.next_due_date,
+          rolled_balance: oldRolledBalance,
+          default_charge_accrued: oldAccruedFees,
         },
         newValues: {
-          principal_balance: newPrincipal,
           term_months: newTerm,
           next_due_date: newDueDate,
+          rolled_balance: newRolledBalance,
+          default_charge_accrued: newAccruedFees,
+          monthly_payment: newMonthlyPayment,
+          total_interest: newTotalInterest,
         },
       });
 
@@ -1082,7 +1373,7 @@ export class LoanService {
         await notificationService.createNotification({
           userId: (loan as any).user_id,
           title: "Loan Capitalization & Rollover",
-          message: `Your overdue penalty of ₦${feeAmount} has been capitalized into your principal balance. Your new principal is ₦${newPrincipal} and your due date has been extended.`,
+          message: `Your overdue penalty of ₦${feeAmount} has been capitalized into your loan balance. Your monthly repayment is now ₦${newMonthlyPayment} and your due date has been extended.`,
           type: "system_alert",
           channels: ["in_app"],
         });
@@ -1140,6 +1431,11 @@ export class LoanService {
       throw new AppError(404, "Loan not found");
     }
 
+    // Clean up ledger references so they don't dangle after deletion
+    await prisma.transactionLedger.deleteMany({
+      where: { source_id: loanId },
+    });
+
     await prisma.loan.delete({
       where: { id: loanId },
     });
@@ -1147,7 +1443,14 @@ export class LoanService {
     return { id: loanId };
   }
 
-  async updateLoanFinancials(loanId: string, updates: any) {
+  // Admin edit of a loan's financial record. The admin may change any field;
+  // dependent values are then re-derived so the record stays consistent:
+  //   start_date + term_months              → end_date
+  //   amount + interest_rate + term_months  → monthly_payment + total_interest
+  //   schedule + marked / in-flight months  → next_due_date
+  // The edit is append-only: past ledger rows are never rewritten, but the change
+  // is recorded as a `timeline_edit` event plus an audit entry for traceability.
+  async updateLoanFinancials(loanId: string, updates: any, adminId?: string) {
     const loan = await prisma.loan.findUnique({
       where: { id: loanId },
     });
@@ -1156,22 +1459,205 @@ export class LoanService {
       throw new AppError(404, "Loan not found");
     }
 
+    const stored = loan as any;
     const updatedData: any = {};
-    if (updates.amount !== undefined) updatedData.amount = updates.amount;
-    if (updates.principal_balance !== undefined) updatedData.principal_balance = updates.principal_balance;
-    if (updates.interest_rate !== undefined) updatedData.interest_rate = updates.interest_rate;
-    if (updates.start_date !== undefined) updatedData.start_date = new Date(updates.start_date);
-    if (updates.term_months !== undefined) updatedData.term_months = updates.term_months;
-    if (updates.end_date !== undefined) updatedData.end_date = updates.end_date ? new Date(updates.end_date) : null;
-    if (updates.status !== undefined && updates.status !== "") updatedData.status = updates.status;
-    if (updates.monthly_payment !== undefined) updatedData.monthly_payment = updates.monthly_payment;
-    if (updates.rolled_balance !== undefined) updatedData.rolled_balance = updates.rolled_balance;
-    if (updates.compounded_interest !== undefined) updatedData.compounded_interest = updates.compounded_interest;
+
+    // ---- status (validated against the loan_status enum) ----
+    if (updates.status !== undefined && updates.status !== "") {
+      if (!LOAN_STATUS_VALUES.includes(updates.status)) {
+        throw new AppError(400, `Invalid loan status: ${updates.status}`);
+      }
+      updatedData.status = updates.status;
+    }
+
+    // ---- contract inputs ----
+    const amountProvided = updates.amount !== undefined;
+    const rateProvided = updates.interest_rate !== undefined;
+    const termProvided = updates.term_months !== undefined;
+    const startProvided = updates.start_date !== undefined;
+
+    const newAmount = amountProvided ? Number(updates.amount) : Number(stored.amount);
+    const newRate = rateProvided ? Number(updates.interest_rate) : Number(stored.interest_rate);
+    const newTerm = termProvided ? Number(updates.term_months) : Number(stored.term_months);
+    const newStartDate = startProvided
+      ? parseLoanDate(updates.start_date, "start date")
+      : stored.start_date
+        ? new Date(stored.start_date)
+        : null;
+
+    // ---- outstanding principal ----
+    let newPrincipal =
+      updates.principal_balance !== undefined
+        ? Number(updates.principal_balance)
+        : Number(stored.principal_balance);
+    const principalExplicitlyChanged =
+      updates.principal_balance !== undefined &&
+      Math.abs(Number(updates.principal_balance) - Number(stored.principal_balance)) > 0.005;
+    // When the contract amount changes on an untouched loan (nothing repaid yet),
+    // keep the outstanding balance in step unless the admin changed it on purpose.
+    if (amountProvided && !principalExplicitlyChanged && Number(stored.amount_paid) === 0) {
+      newPrincipal = newAmount;
+    }
+    updatedData.principal_balance = round2(Math.max(0, newPrincipal));
+
+    // ---- timeline: end_date follows start_date + term_months ----
+    if (startProvided) updatedData.start_date = newStartDate;
+    if (termProvided) updatedData.term_months = newTerm;
+    if (updates.end_date !== undefined && updates.end_date !== null && !startProvided && !termProvided) {
+      updatedData.end_date = parseLoanDate(updates.end_date, "end date");
+    } else if ((startProvided || termProvided) && newStartDate && newTerm) {
+      updatedData.end_date = addMonths(newStartDate, newTerm);
+    }
+
+    // ---- contract outputs: monthly_payment + total_interest ----
+    const contractChanged =
+      (amountProvided && Math.abs(newAmount - Number(stored.amount)) > 0.005) ||
+      (rateProvided && Math.abs(newRate - Number(stored.interest_rate)) > 0.005) ||
+      (termProvided && newTerm !== Number(stored.term_months));
+
+    const mpProvided = updates.monthly_payment !== undefined;
+    const tiProvided = updates.total_interest !== undefined;
+    const mpChanged =
+      mpProvided && Math.abs(Number(updates.monthly_payment) - Number(stored.monthly_payment)) > 0.005;
+    const tiChanged =
+      tiProvided && Math.abs(Number(updates.total_interest) - Number(stored.total_interest)) > 0.005;
+
+    let newMonthlyPayment: number;
+
+    // Only touch the financial terms when something that actually determines
+    // them changed. A timeline-only edit (e.g. backdating the start date) must
+    // leave monthly_payment and total_interest exactly as they were recorded.
+    const termsChanged = contractChanged || mpChanged || tiChanged;
+
+    if (contractChanged) {
+      // Rate / term / amount moved → rebuild the installment from the contract.
+      newMonthlyPayment = calculateMonthlyPayment(newAmount, newRate, newTerm);
+    } else if (mpChanged) {
+      // The admin edited the installment directly.
+      newMonthlyPayment = Number(updates.monthly_payment);
+    } else if (tiChanged) {
+      // The admin edited total interest directly → derive the installment from it.
+      newMonthlyPayment =
+        newTerm > 0 ? (newAmount + Number(updates.total_interest)) / newTerm : Number(stored.monthly_payment);
+    } else {
+      newMonthlyPayment = Number(stored.monthly_payment);
+    }
+
+    if (termsChanged) {
+      newMonthlyPayment = round2(newMonthlyPayment);
+      updatedData.monthly_payment = newMonthlyPayment;
+
+      if (tiChanged && !contractChanged && !mpChanged) {
+        // Honour the admin's explicit total interest exactly.
+        updatedData.total_interest = round2(Number(updates.total_interest));
+      } else {
+        // Derive total interest from the repayment schedule itself (the same
+        // declining-balance rules used when the loan was created), rather than
+        // the flat `amount × rate × term` or the bare installment identity.
+        updatedData.total_interest = computeScheduledTotalInterest(
+          newAmount,
+          newMonthlyPayment,
+          newRate,
+          newTerm
+        );
+      }
+    }
+
+    if (amountProvided) updatedData.amount = newAmount;
+    if (rateProvided) updatedData.interest_rate = newRate;
+
+    // ---- repayments / rollover state (admin corrections) ----
+    if (updates.amount_paid !== undefined) updatedData.amount_paid = Number(updates.amount_paid);
+    if (updates.rolled_balance !== undefined) updatedData.rolled_balance = Number(updates.rolled_balance);
+    if (updates.compounded_interest !== undefined) {
+      updatedData.compounded_interest = Number(updates.compounded_interest);
+    }
+
+    // ---- schedule: next_due_date ----
+    if (updates.next_due_date !== undefined) {
+      updatedData.next_due_date = parseLoanDate(updates.next_due_date, "next due date");
+    } else if (startProvided || termProvided) {
+      updatedData.next_due_date = await computeLoanNextDueDate(
+        loanId,
+        newStartDate,
+        newTerm,
+        stored.marked_payments
+      );
+    }
+
+    updatedData.updated_at = new Date();
 
     const result = await prisma.loan.update({
       where: { id: loanId },
       data: updatedData,
     });
+
+    // ---- append-only timeline/audit record (never rewrites history) ----
+    const trackedFields = [
+      "amount",
+      "principal_balance",
+      "interest_rate",
+      "start_date",
+      "end_date",
+      "term_months",
+      "monthly_payment",
+      "total_interest",
+      "amount_paid",
+      "rolled_balance",
+      "compounded_interest",
+      "status",
+      "next_due_date",
+    ];
+
+    const normalize = (value: any): any => {
+      if (value === null || value === undefined) return null;
+      if (value instanceof Date) return value.toISOString();
+      if (typeof value === "object" && typeof value.toNumber === "function") return Number(value);
+      return value;
+    };
+
+    const before: Record<string, any> = {};
+    const after: Record<string, any> = {};
+    const changes: Record<string, { from: any; to: any }> = {};
+    for (const field of trackedFields) {
+      const oldValue = normalize(stored[field]);
+      const newValue = Object.prototype.hasOwnProperty.call(updatedData, field)
+        ? normalize(updatedData[field])
+        : oldValue;
+      before[field] = oldValue;
+      after[field] = newValue;
+      if (String(oldValue) !== String(newValue)) {
+        changes[field] = { from: oldValue, to: newValue };
+      }
+    }
+
+    const changeSummary =
+      Object.entries(changes)
+        .map(([field, value]) => `${field}: ${value.from} → ${value.to}`)
+        .join(", ") || "no field changes";
+
+    try {
+      await ledgerService.logEvent(
+        stored.user_id,
+        loanId,
+        "timeline_edit",
+        `Loan financials edited by admin — ${changeSummary}`
+      );
+    } catch (ledgerError) {
+      console.error("[LEDGER] Failed to log loan financial edit:", ledgerError);
+    }
+
+    try {
+      await auditService.logAction({
+        adminId: adminId || stored.user_id,
+        targetUserId: stored.user_id,
+        action: "loan_updated",
+        oldValues: before,
+        newValues: { ...after, changes },
+      });
+    } catch (auditError) {
+      console.error("[AUDIT] Failed to log loan financial edit:", auditError);
+    }
 
     return result;
   }
