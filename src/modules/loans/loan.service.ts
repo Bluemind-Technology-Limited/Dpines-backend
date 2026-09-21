@@ -266,9 +266,14 @@ export class LoanService {
         }
         newTerm = Math.max(1, newTerm);
 
-        // Raise the monthly repayment so the enlarged balance still clears.
+        // Raise the monthly repayment so the enlarged balance still clears over
+        // the remaining (settled months excluded) term. This mirrors the
+        // reversal applied when a repayment settles the carried balance, so the
+        // two stay in step.
+        const paidPeriods = Array.isArray(rec.marked_payments) ? rec.marked_payments.length : 0;
+        const remainingMonths = Math.max(1, newTerm - paidPeriods);
         const newMonthlyPayment = round2(
-          calculateMonthlyPayment(principal + newRolled, rate, newTerm)
+          calculateMonthlyPayment(principal + newRolled, rate, remainingMonths)
         );
 
         await prisma.loan.update({
@@ -1573,15 +1578,84 @@ export class LoanService {
       updatedData.compounded_interest = Number(updates.compounded_interest);
     }
 
+    // ---- settled months ("the user paid the first N months") ----
+    let newMarked: number[] | undefined;
+    if (updates.marked_payments !== undefined) {
+      newMarked = [
+        ...new Set(
+          (updates.marked_payments as number[])
+            .map((m) => Number(m))
+            .filter((m) => Number.isInteger(m) && m >= 1)
+        ),
+      ].sort((a, b) => a - b);
+      updatedData.marked_payments = newMarked;
+    }
+
+    // ---- clear carried default penalties (admin correction) ----
+    // Applied LAST so it wins over any supplied rolled/compounded values.
+    if (updates.clear_penalties === true) {
+      updatedData.rolled_balance = 0;
+      updatedData.compounded_interest = 0;
+      updatedData.default_charge_accrued = 0;
+      // Reset the penalty cycle anchor so future defaults start fresh from the
+      // (possibly new) schedule rather than re-using the old cycle history.
+      updatedData.last_default_charge_date = null;
+    }
+
+    // ---- keep the installment in step with the carried balance ----
+    // The monthly repayment is raised when a penalty is capitalised. If the
+    // carried balance is changed or cleared here (and the admin did not type a
+    // new installment themselves), re-derive it from the current obligation so a
+    // settled penalty stops inflating the remaining schedule.
+    const rolledTouched =
+      updates.clear_penalties === true ||
+      (updates.rolled_balance !== undefined &&
+        Math.abs(Number(updates.rolled_balance) - Number(stored.rolled_balance || 0)) > 0.005) ||
+      (updates.compounded_interest !== undefined &&
+        Math.abs(
+          Number(updates.compounded_interest) - Number(stored.compounded_interest || 0)
+        ) > 0.005);
+    if (rolledTouched && !mpChanged) {
+      const rolledForPayment =
+        updatedData.rolled_balance !== undefined
+          ? Number(updatedData.rolled_balance)
+          : Number(stored.rolled_balance || 0);
+      const principalForPayment =
+        updatedData.principal_balance !== undefined
+          ? Number(updatedData.principal_balance)
+          : Number(stored.principal_balance ?? stored.amount);
+      const settledMonths = Array.isArray(updatedData.marked_payments)
+        ? updatedData.marked_payments.length
+        : Array.isArray(stored.marked_payments)
+          ? stored.marked_payments.length
+          : 0;
+      const remainingMonths = Math.max(1, newTerm - settledMonths);
+
+      const derivedInstallment = round2(
+        calculateMonthlyPayment(
+          principalForPayment + rolledForPayment,
+          newRate,
+          remainingMonths
+        )
+      );
+      updatedData.monthly_payment = derivedInstallment;
+      updatedData.total_interest = computeScheduledTotalInterest(
+        newAmount,
+        derivedInstallment,
+        newRate,
+        newTerm
+      );
+    }
+
     // ---- schedule: next_due_date ----
     if (updates.next_due_date !== undefined) {
       updatedData.next_due_date = parseLoanDate(updates.next_due_date, "next due date");
-    } else if (startProvided || termProvided) {
+    } else if (startProvided || termProvided || newMarked !== undefined) {
       updatedData.next_due_date = await computeLoanNextDueDate(
         loanId,
         newStartDate,
         newTerm,
-        stored.marked_payments
+        newMarked ?? stored.marked_payments
       );
     }
 
@@ -1605,6 +1679,8 @@ export class LoanService {
       "amount_paid",
       "rolled_balance",
       "compounded_interest",
+      "default_charge_accrued",
+      "marked_payments",
       "status",
       "next_due_date",
     ];

@@ -3,6 +3,7 @@
 import prisma from "../configs/database.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { ledgerService } from "./ledger.service.js";
+import { calculateMonthlyPayment } from "../lib/utils.js";
 
 type LoanStatus = "pending" | "active" | "completed" | "overdue" | "rejected";
 
@@ -377,34 +378,61 @@ export class PaymentService {
       }
 
       // Update loan with new values
+      const currentRolled = Number((loan as any).rolled_balance || 0);
+      const newRolledBalance = Math.max(0, currentRolled - calculation.rolledPaid);
+      const rolledChanged = Math.abs(newRolledBalance - currentRolled) > 0.005;
+
+      const updateData: any = {
+        principal_balance: calculation.newPrincipalBalance,
+        // amount_paid = total money received, so it must include EVERY part of
+        // the payment: interest + fees + carried balance + principal. Omitting
+        // the carried-balance portion made "paid so far" understate the total.
+        // NOTE: Number(...) is required — Prisma Decimal.valueOf() returns a
+        // string, so Decimal + number would string-concatenate.
+        amount_paid:
+          Number((loan as any).amount_paid || 0) +
+          calculation.interestPaid +
+          calculation.feesPaid +
+          calculation.rolledPaid +
+          calculation.principalReduction,
+        // Fees that were just paid REDUCE the outstanding penalty. They must
+        // not be re-accrued, otherwise a settled penalty comes back forever.
+        default_charge_accrued: Math.max(
+          0,
+          Number((loan as any).default_charge_accrued || 0) - calculation.feesPaid
+        ),
+        status: calculation.newStatus as any,
+        marked_payments: markedPayments,
+        next_due_date: calculation.nextDueDate,
+        last_payment_date: new Date(),
+        // Carried penalties are settled by the repayment (they are no longer
+        // left stranded once capitalised).
+        rolled_balance: newRolledBalance,
+        // Heal missing start_date for legacy loans so future approvals work
+        start_date: (loan as any).start_date ?? (loan as any).created_at,
+      };
+
+      // The monthly repayment was RAISED when the penalty was capitalised. Once
+      // the repayment settles that carried balance it must come back DOWN, or
+      // the penalty gets charged twice — once as the carried balance and again
+      // baked into the remaining installments.
+      if (rolledChanged) {
+        const rate = Number((loan as any).interest_rate);
+        const term = Number((loan as any).term_months) || 0;
+        const remaining = Math.max(1, term - markedPayments.length);
+        updateData.monthly_payment =
+          Math.round(
+            calculateMonthlyPayment(
+              calculation.newPrincipalBalance + newRolledBalance,
+              rate,
+              remaining
+            ) * 100
+          ) / 100;
+      }
+
       const updatedLoan = await client.loans.update({
         where: { id: loanId },
-        data: {
-          principal_balance: calculation.newPrincipalBalance,
-          // amount_paid = total money received (interest + fees + principal), so
-          // the UI's "paid so far" / progress reflects the full installment.
-          // NOTE: Number(...) is required — Prisma Decimal.valueOf() returns a
-          // string, so Decimal + number would string-concatenate.
-          amount_paid: Number((loan as any).amount_paid || 0) + calculation.interestPaid + calculation.feesPaid + calculation.principalReduction,
-          // Fees that were just paid REDUCE the outstanding penalty. They must
-          // not be re-accrued, otherwise a settled penalty comes back forever.
-          default_charge_accrued: Math.max(
-            0,
-            Number((loan as any).default_charge_accrued || 0) - calculation.feesPaid
-          ),
-          status: calculation.newStatus as any,
-          marked_payments: markedPayments,
-          next_due_date: calculation.nextDueDate,
-          last_payment_date: new Date(),
-          // Carried penalties are settled by the repayment (they are no longer
-          // left stranded once capitalised).
-          rolled_balance: Math.max(
-            0,
-            Number((loan as any).rolled_balance || 0) - calculation.rolledPaid
-          ),
-          // Heal missing start_date for legacy loans so future approvals work
-          start_date: (loan as any).start_date ?? (loan as any).created_at,
-        },
+        data: updateData,
       });
 
       return updatedLoan;

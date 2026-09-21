@@ -133,6 +133,11 @@ export const updateLoanFinancialsSchema = z.object({
   rolled_balance: z.number().nonnegative().optional(),
   compounded_interest: z.number().nonnegative().optional(),
   next_due_date: z.string().or(z.date()).nullable().optional(),
+  // Settled months (1-based). Used when backdating an admin edit to record that
+  // the borrower already paid the first N months.
+  marked_payments: z.array(z.number().int().positive()).optional(),
+  // Zero out carried default penalties (rolled balance / compounded interest).
+  clear_penalties: z.boolean().optional(),
 });
 
 export const updateInvestmentFinancialsSchema = z.object({
