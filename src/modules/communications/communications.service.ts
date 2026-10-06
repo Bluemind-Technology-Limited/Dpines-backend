@@ -1,6 +1,7 @@
 import prisma from "../../configs/database.js";
 import { AppError } from "../../middlewares/error.middleware.js";
 import notificationService from "../notifications/notification.service.js";
+import { edgeFunctionService } from "../../services/edge-function.service.js";
 
 export class CommunicationsService {
   async getTemplates() {
@@ -111,54 +112,77 @@ export class CommunicationsService {
   }
 
   async sendCommunication(
-    userIds: string[],
+    userIds: string[] | undefined,
     _templateId: string | undefined,
-    type: string,
+    type: string | undefined,
     subject: string,
-    body: string
+    body: string,
+    to?: string
   ) {
     try {
-      const results = [];
+      if (!subject || !body) {
+        throw new AppError(400, "subject and body are required");
+      }
 
-      for (const userId of userIds) {
+      // The admin UI sends a single email recipient (`to`); the bulk API sends
+      // `userIds`. Support both. Missing `type` defaults to email.
+      const channel = type || "email";
+
+      const results: Array<{ userId: string; success: boolean; error?: string }> = [];
+      const recipients: any[] = [];
+
+      for (const userId of Array.isArray(userIds) ? userIds : []) {
         const user = await prisma.userProfile.findUnique({
           where: { id: userId },
         });
-
         if (!user) {
           results.push({ userId, success: false, error: "User profile not found" });
           continue;
         }
+        recipients.push(user);
+      }
 
+      if (to) {
+        const user = await prisma.userProfile.findUnique({ where: { email: to } });
+        if (!user) {
+          results.push({ userId: to, success: false, error: "User profile not found" });
+        } else {
+          recipients.push(user);
+        }
+      }
+
+      if (recipients.length === 0 && results.length === 0) {
+        throw new AppError(400, "Provide at least one recipient (userIds or to)");
+      }
+
+      for (const user of recipients) {
         try {
-          if (type === "email") {
-            const userFirstName = user.first_name || "";
-            const userLastName = user.last_name || "";
-            const userFullName = `${userFirstName} ${userLastName}`.trim();
-            const customizedSubject = subject.replace(/{{firstName}}/g, userFirstName).replace(/{{lastName}}/g, userLastName).replace(/{{fullName}}/g, userFullName);
-            const customizedBody = body.replace(/{{firstName}}/g, userFirstName).replace(/{{lastName}}/g, userLastName).replace(/{{fullName}}/g, userFullName);
+          const userFirstName = user.first_name || "";
+          const userLastName = user.last_name || "";
+          const userFullName = `${userFirstName} ${userLastName}`.trim();
+          const customize = (text: string) =>
+            text
+              .replace(/{{firstName}}/g, userFirstName)
+              .replace(/{{lastName}}/g, userLastName)
+              .replace(/{{fullName}}/g, userFullName);
 
-            const resendApiKey = process.env.RESEND_API_KEY;
-            if (resendApiKey && user.email) {
-              const { Resend } = await import("resend");
-              const resend = new Resend(resendApiKey);
-              await resend.emails.send({
-                from: "DPINES <noreply@dpines.ng>",
-                to: user.email,
-                subject: customizedSubject,
-                html: customizedBody.replace(/\n/g, "<br/>"),
-                text: customizedBody,
-              });
+          const customizedSubject = customize(subject);
+          const customizedBody = customize(body);
+
+          if (channel === "email") {
+            if (!user.email) {
+              throw new Error("User has no email address");
             }
+            // Route through the Supabase edge function — the Resend credentials
+            // live on Supabase (edge function secrets), not in the Express env.
+            await edgeFunctionService.callFunction("send-communication", {
+              to: user.email,
+              subject: customizedSubject,
+              body: customizedBody,
+            });
           } else {
-            const userFirstName = user.first_name || "";
-            const userLastName = user.last_name || "";
-            const userFullName = `${userFirstName} ${userLastName}`.trim();
-            const customizedSubject = subject.replace(/{{firstName}}/g, userFirstName).replace(/{{lastName}}/g, userLastName).replace(/{{fullName}}/g, userFullName);
-            const customizedBody = body.replace(/{{firstName}}/g, userFirstName).replace(/{{lastName}}/g, userLastName).replace(/{{fullName}}/g, userFullName);
-
             await notificationService.createNotification({
-              userId,
+              userId: user.id,
               title: customizedSubject,
               message: customizedBody,
               type: "system_alert",
@@ -166,14 +190,15 @@ export class CommunicationsService {
             });
           }
 
-          results.push({ userId, success: true });
+          results.push({ userId: user.id, success: true });
         } catch (err: any) {
-          results.push({ userId, success: false, error: err.message || "Failed delivery" });
+          results.push({ userId: user.id, success: false, error: err?.message || "Failed delivery" });
         }
       }
 
       return results;
     } catch (error) {
+      if (error instanceof AppError) throw error;
       throw new AppError(500, "Failed to send communications");
     }
   }

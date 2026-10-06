@@ -102,8 +102,24 @@ export const addMessage = asyncHandler(async (req: Request, res: Response) => {
 
 export const updateTicketStatus = asyncHandler(
   async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new AppError(401, "Unauthorized");
+    }
+
     const { ticketId } = req.params;
     const body = updateTicketStatusSchema.parse(req.body);
+
+    // Throws 404 if the ticket does not exist.
+    const existing = await ticketService.getTicketById(ticketId);
+
+    // Staff can change any ticket; a regular user may only change their own
+    // (e.g. closing a resolved thread).
+    const isStaff = req.user.role === "admin" || req.user.role === "support";
+    const isOwner = existing.user_id === req.user.sub;
+
+    if (!isStaff && !isOwner) {
+      throw new AppError(403, "You do not have permission to update this ticket");
+    }
 
     const ticket = await ticketService.updateTicketStatus(ticketId, body.status);
 
@@ -132,4 +148,27 @@ export const closeTicket = asyncHandler(async (req: Request, res: Response) => {
   const ticket = await ticketService.closeTicket(ticketId);
 
   sendSuccess(res, ticket, "Ticket closed successfully");
+});
+
+export const deleteTicket = asyncHandler(async (req: Request, res: Response) => {
+  if (!req.user) {
+    throw new AppError(401, "Unauthorized");
+  }
+
+  const { ticketId } = req.params;
+
+  // Throws 404 if the ticket does not exist.
+  const ticket = await ticketService.getTicketById(ticketId);
+
+  // Staff can delete any ticket; a regular user may only delete their own.
+  const isStaff = req.user.role === "admin" || req.user.role === "support";
+  const isOwner = ticket.user_id === req.user.sub;
+
+  if (!isStaff && !isOwner) {
+    throw new AppError(403, "You do not have permission to delete this ticket");
+  }
+
+  await ticketService.deleteTicket(ticketId);
+
+  sendSuccess(res, { id: ticketId }, "Ticket deleted successfully");
 });

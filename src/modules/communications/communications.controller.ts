@@ -39,13 +39,14 @@ export const deleteTemplate = asyncHandler(async (req: Request, res: Response) =
 });
 
 export const sendCommunication = asyncHandler(async (req: Request, res: Response) => {
-  const { userIds, templateId, type, subject, body } = req.body;
+  const { userIds, to, templateId, type, subject, body } = req.body;
   const results = await communicationsService.sendCommunication(
     userIds,
     templateId,
     type,
     subject,
-    body
+    body,
+    to
   );
   sendSuccess(res, results, "Communications processed");
 });

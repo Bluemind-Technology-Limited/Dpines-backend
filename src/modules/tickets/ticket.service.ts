@@ -177,6 +177,17 @@ export class TicketService {
       throw new AppError(500, "Failed to close ticket");
     }
   }
+
+  async deleteTicket(ticketId: string): Promise<{ id: string }> {
+    try {
+      // ticket_messages cascade on delete (FK onDelete: Cascade).
+      await prisma.ticket.delete({ where: { id: ticketId } });
+      return { id: ticketId };
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, "Failed to delete ticket");
+    }
+  }
 }
 
 export const ticketService = new TicketService();

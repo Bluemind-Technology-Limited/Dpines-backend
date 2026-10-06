@@ -5,11 +5,12 @@ import type {
   InvestmentStatus,
   PayoutFrequency,
 } from "../../types/index.js";
-import { calculateInvestmentCurrentValue, getMonthsBetweenDates } from "../../lib/utils.js";
+import { calculateInvestmentCurrentValue, getMonthsBetweenDates, formatCurrency } from "../../lib/utils.js";
 import { ledgerService } from "../../services/ledger.service.js";
 import { auditService } from "../../services/audit.service.js";
 import notificationService from "../notifications/notification.service.js";
 import { edgeFunctionService } from "../../services/edge-function.service.js";
+import { adminNotificationService } from "../../services/admin-notification.service.js";
 
 export class InvestmentService {
   async createInvestment(
@@ -55,6 +56,16 @@ export class InvestmentService {
         console.error("[LEDGER ERROR] Failed to log investment creation:", ledgerError);
         // Don't fail the investment creation if ledger logging fails
       }
+
+      // Alert admins so the new contribution appears in the Alert Center.
+      const applicantName =
+        `${user.first_name || ""} ${user.last_name || ""}`.trim() || "A user";
+      await adminNotificationService.create({
+        title: "New Contribution Application",
+        message: `${applicantName} applied for a contribution of ${formatCurrency(amount)} over ${termMonths} month(s).`,
+        type: "investment_application",
+        metadata: { investment_id: investment.id, user_id: userId, amount },
+      });
 
       return investment;
     } catch (error) {
@@ -275,18 +286,14 @@ export class InvestmentService {
         console.error("[LEDGER] Failed to log maturity action:", ledgerError);
       }
 
-      // Notify admin on maturity action asynchronously using Edge Function
-      if (investment && !investment.maturity_action && action && (investment as any).users) {
-        const user = (investment as any).users;
-        const userName = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "User";
-        edgeFunctionService.notifyAdminMaturityAction(
-          updatedInvestment.id,
-          userName,
+      // Alert admins that the contributor requested a maturity action.
+      if (!investment.maturity_action && action) {
+        await this.notifyAdminsOfMaturityAction(
+          investment,
+          investmentId,
           action,
           Number(updatedInvestment.amount)
-        ).catch((err) => {
-          console.error("Failed to trigger maturity action admin notification edge function:", err);
-        });
+        );
       }
 
       return updatedInvestment;
@@ -294,6 +301,59 @@ export class InvestmentService {
       if (error instanceof AppError) throw error;
       throw new AppError(500, "Failed to set maturity action");
     }
+  }
+
+  // Create the in-app admin alert + email for a maturity-action request.
+  // The in-app row is written here (not only via the legacy DB trigger) so the
+  // admin bell works even if that trigger no longer exists. It is idempotent: if
+  // the trigger already inserted the same alert, this is a no-op. The email send
+  // is fire-and-forget so a mail failure never blocks the request.
+  private async notifyAdminsOfMaturityAction(
+    investment: any,
+    investmentId: string,
+    action: "withdraw" | "rollover",
+    amount: number
+  ): Promise<void> {
+    const user = investment.users;
+    const userName = `${user?.first_name || ""} ${user?.last_name || ""}`.trim() || "User";
+
+    try {
+      // Only look at alerts created just now — the legacy DB trigger (if it
+      // still exists) inserts within this same request, so this catches it
+      // without suppressing a genuine re-request made later.
+      const since = new Date(Date.now() - 60_000);
+      const recent = await prisma.admin_notifications.findMany({
+        where: { type: "maturity_action_selected", created_at: { gte: since } },
+      });
+      const alreadyExists = recent.some((n: any) => {
+        const md = (n.metadata || {}) as Record<string, unknown>;
+        return md.investment_id === investmentId && md.action === action;
+      });
+
+      if (!alreadyExists) {
+        await prisma.admin_notifications.create({
+          data: {
+            title: "Maturity Action Requested",
+            message: `User ${userName} requested ${action} for investment #${investmentId} (${formatCurrency(amount)}).`,
+            type: "maturity_action_selected",
+            metadata: {
+              investment_id: investmentId,
+              user_id: investment.user_id,
+              action,
+              amount,
+            },
+          },
+        });
+      }
+    } catch (notifErr) {
+      console.error("[NOTIFY] Failed to create maturity action admin notification:", notifErr);
+    }
+
+    edgeFunctionService
+      .notifyAdminMaturityAction(investmentId, userName, action, amount)
+      .catch((err) => {
+        console.error("Failed to trigger maturity action admin notification edge function:", err);
+      });
   }
 
   // Request a top-up — creates a PENDING request that an admin must approve.
@@ -330,6 +390,7 @@ export class InvestmentService {
 
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: { users: true },
       });
 
       if (!investment) {
@@ -375,6 +436,23 @@ export class InvestmentService {
       }
 
       console.log(`[TOP-UP] Request created for investment ${investmentId} (amount ${amount}, extension: ${tenureExtensionType}, receipt provided)`);
+
+      // Alert admins so the top-up request appears in the Alert Center.
+      const owner = (investment as any).users;
+      const requesterName =
+        `${owner?.first_name || ""} ${owner?.last_name || ""}`.trim() || "A user";
+      await adminNotificationService.create({
+        title: "Investment Top-Up Requested",
+        message: `${requesterName} requested a top-up of ${formatCurrency(amount)} for investment #${investmentId}.`,
+        type: "investment_topup",
+        metadata: {
+          investment_id: investmentId,
+          topup_id: topUp.id,
+          user_id: ownerId,
+          amount,
+        },
+      });
+
       return topUp;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -1661,18 +1739,14 @@ export class InvestmentService {
         },
       });
 
-      // Notify admin on maturity action asynchronously using Edge Function
-      if (investment && !investment.maturity_action && action && (investment as any).users) {
-        const user = (investment as any).users;
-        const userName = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "User";
-        edgeFunctionService.notifyAdminMaturityAction(
-          updatedInvestment.id,
-          userName,
+      // Alert admins when an admin sets a previously-unset maturity action.
+      if (!investment.maturity_action && action) {
+        await this.notifyAdminsOfMaturityAction(
+          investment,
+          investmentId,
           action,
           Number(updatedInvestment.amount)
-        ).catch((err) => {
-          console.error("Failed to trigger maturity action admin notification edge function:", err);
-        });
+        );
       }
 
       // Log audit action

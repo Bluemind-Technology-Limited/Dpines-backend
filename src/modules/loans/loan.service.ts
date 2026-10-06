@@ -7,12 +7,14 @@ import type {
 import {
   calculateMonthlyPayment,
   calculateTotalInterest,
+  formatCurrency,
 } from "../../lib/utils.js";
 import { paymentService } from "../../services/payment.service.js";
 import { ledgerService } from "../../services/ledger.service.js";
 import { auditService } from "../../services/audit.service.js";
 import notificationService from "../notifications/notification.service.js";
 import { edgeFunctionService } from "../../services/edge-function.service.js";
+import { adminNotificationService } from "../../services/admin-notification.service.js";
 
 const LOAN_STATUS_VALUES: readonly string[] = [
   "pending",
@@ -162,6 +164,16 @@ export class LoanService {
       } catch (ledgerError) {
         console.error("[LEDGER] Failed to log loan creation:", ledgerError);
       }
+
+      // Alert admins so the new application appears in the Alert Center.
+      const applicantName =
+        `${user.first_name || ""} ${user.last_name || ""}`.trim() || "A user";
+      await adminNotificationService.create({
+        title: "New Loan Application",
+        message: `${applicantName} applied for a loan of ${formatCurrency(amount)} over ${termMonths} month(s).`,
+        type: "loan_application",
+        metadata: { loan_id: loan.id, user_id: userId, amount },
+      });
 
       return loan as unknown as Loan;
     } catch (error) {
@@ -416,14 +428,20 @@ export class LoanService {
       // Send loan approved email asynchronously using Edge Function
       if ((loan as any).users) {
         const user = (loan as any).users;
-        edgeFunctionService.sendLoanApprovedEmail(
-          user.email,
-          user.first_name || "Borrower",
-          Number(approvedLoan.amount),
-          approvedLoan.id,
-          Number(approvedLoan.monthly_payment),
-          approvedLoan.term_months
-        ).catch((err) => {
+        const userName =
+          `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Borrower";
+        edgeFunctionService.sendLoanApprovedEmail({
+          to: user.email,
+          userName,
+          loanId: approvedLoan.id,
+          amount: Number(approvedLoan.amount),
+          interestRate: Number(approvedLoan.interest_rate),
+          termMonths: Number(approvedLoan.term_months),
+          monthlyPayment: Number(approvedLoan.monthly_payment),
+          totalInterest: Number(approvedLoan.total_interest),
+          startDate: new Date(approvedLoan.start_date ?? startDate).toISOString(),
+          endDate: new Date(approvedLoan.end_date ?? endDate).toISOString(),
+        }).catch((err) => {
           console.error("Failed to trigger loan approved email edge function:", err);
         });
       }
@@ -496,6 +514,7 @@ export class LoanService {
     try {
       const loan = await prisma.loan.findUnique({
         where: { id: loanId },
+        include: { users: true },
       });
 
       if (!loan) {
@@ -524,6 +543,27 @@ export class LoanService {
       } catch (ledgerError) {
         console.error("[LEDGER] Failed to log recorded payment:", ledgerError);
       }
+
+      // Alert admins so the pending repayment shows in the Alert Center.
+      const owner = (loan as any).users;
+      const borrowerName =
+        `${owner?.first_name || ""} ${owner?.last_name || ""}`.trim() || "A borrower";
+      const methodLabel =
+        paymentMethod === "contribution_deduction"
+          ? "a contribution deduction"
+          : "a bank transfer";
+      await adminNotificationService.create({
+        title: "Loan Repayment Pending",
+        message: `${borrowerName} submitted a repayment of ${formatCurrency(amount)} for month ${monthNumber} via ${methodLabel}.`,
+        type: "loan_repayment",
+        metadata: {
+          loan_id: loanId,
+          payment_id: payment.id,
+          user_id: (loan as any).user_id,
+          amount,
+          method: paymentMethod,
+        },
+      });
 
       return payment as unknown as LoanPayment;
     } catch (error) {
@@ -692,7 +732,7 @@ export class LoanService {
         where: { id: paymentId },
         data: {
           status: "rejected" as any,
-          remarks: rejectionReason,
+          remarks: rejectionReason || null,
         },
       });
 

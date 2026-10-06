@@ -48,11 +48,19 @@ export const verifySupabaseToken = async (
     const { data, error } = await supabaseAdmin.auth.getUser(token);
 
     if (error || !data.user) {
+      const reason = error?.message || "no user returned";
       console.error(
         `[AUTH] Token verification failed for ${req.method} ${req.path} (supabase=${process.env.SUPABASE_URL || "NOT SET"}):`,
-        error?.message || "no user returned"
+        reason
       );
-      return next(new AppError(401, "Invalid or expired token"));
+      // Surface the underlying Supabase reason outside production so auth
+      // failures are diagnosable from the client (toast / Network tab) instead
+      // of a generic 401 that hides the cause.
+      const message =
+        process.env.NODE_ENV === "production"
+          ? "Invalid or expired token"
+          : `Invalid or expired token (${reason})`;
+      return next(new AppError(401, message));
     }
 
     // Fetch user profile from database

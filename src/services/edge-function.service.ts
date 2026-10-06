@@ -43,21 +43,37 @@ export class EdgeFunctionService {
   // Welcome Email
   async sendWelcomeEmail(email: string, firstName: string, lastName: string) {
     return this.callFunction("send-welcome-email", {
-      to: email,
-      firstName,
-      lastName,
+      email,
+      first_name: firstName,
+      last_name: lastName,
     });
   }
 
   // Loan Approval Confirmation
-  async sendLoanApprovedEmail(to: string, firstName: string, amount: number, loanId: string, monthlyPayment: number, termMonths: number) {
+  // The edge function reads snake_case fields, so map them explicitly.
+  async sendLoanApprovedEmail(params: {
+    to: string;
+    userName: string;
+    loanId: string;
+    amount: number;
+    interestRate: number;
+    termMonths: number;
+    monthlyPayment: number;
+    totalInterest: number;
+    startDate: string;
+    endDate: string;
+  }) {
     return this.callFunction("send-loan-approved-email", {
-      to,
-      firstName,
-      amount,
-      loanId,
-      monthlyPayment,
-      termMonths,
+      loan_id: params.loanId,
+      user_email: params.to,
+      user_name: params.userName,
+      loan_amount: params.amount,
+      interest_rate: params.interestRate,
+      term_months: params.termMonths,
+      monthly_payment: params.monthlyPayment,
+      total_interest: params.totalInterest,
+      start_date: params.startDate,
+      end_date: params.endDate,
     });
   }
 

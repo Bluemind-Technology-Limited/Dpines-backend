@@ -191,16 +191,13 @@ export const approveLoanPayment = asyncHandler(
 export const rejectLoanPayment = asyncHandler(
   async (req: Request, res: Response) => {
     const { paymentId } = req.params;
-    const { rejectionReason } = req.body;
 
-    if (!rejectionReason) {
-      throw new AppError(400, "Rejection reason is required");
-    }
+    // The admin UI treats the reason as optional; accept either key name so this
+    // stays compatible with older callers that sent `remarks`.
+    const { rejectionReason, remarks } = req.body ?? {};
+    const reason = String(rejectionReason ?? remarks ?? "").trim();
 
-    const payment = await loanService.rejectLoanPayment(
-      paymentId,
-      rejectionReason
-    );
+    const payment = await loanService.rejectLoanPayment(paymentId, reason);
 
     sendSuccess(res, payment, "Loan payment rejected successfully");
   }
