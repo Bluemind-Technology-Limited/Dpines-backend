@@ -44,7 +44,10 @@ import prisma from "./configs/database.js";
 app.get("/", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
-    message: "DPINES Nigeria API Server is running!"
+    message: "DPINES Nigeria API Server is running!",
+    // Vercel injects this so you can verify exactly which commit is deployed.
+    commit: process.env.VERCEL_GIT_COMMIT_SHA || "local",
+    env: env.NODE_ENV,
   });
 });
 
@@ -85,6 +88,10 @@ app.use((req: Request, res: Response) => {
 // Error Handler (must be last)
 app.use(errorHandler);
 
+// Start the HTTP server only for long-lived processes. On Vercel the app is
+// imported by api/index.ts and invoked per-request, so binding a port here is
+// wrong and can make the serverless function misbehave.
+if (!process.env.VERCEL) {
 // Start server
 const PORT = env.PORT;
 const server = app.listen(PORT, async () => {
@@ -138,5 +145,6 @@ process.on("SIGINT", () => {
     process.exit(0);
   });
 });
+}
 
 export default app;
