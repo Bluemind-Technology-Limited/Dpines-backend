@@ -8,8 +8,8 @@ export class AuthService {
   async generateOTP(email: string): Promise<string> {
     try {
       // Check if user exists
-      const user = await prisma.userProfile.findUnique({
-        where: { email },
+      const user = await prisma.userProfile.findFirst({
+        where: { email: { equals: email.trim(), mode: "insensitive" } },
       });
 
       if (!user) {
@@ -20,10 +20,10 @@ export class AuthService {
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
 
-      // Save OTP to database
+      // Save OTP to database (stored against the lower-cased email)
       await prisma.otpRecord.create({
         data: {
-          email,
+          email: email.trim().toLowerCase(),
           code: otp,
           expires_at: expiresAt,
         },
@@ -38,14 +38,19 @@ export class AuthService {
 
   async verifyOTP(email: string, code: string): Promise<boolean> {
     try {
+      // OTPs are generated against the lower-cased email (the send-otp edge
+      // function calls generate_otp with email.toLowerCase()), so match the
+      // email case-insensitively — otherwise a correct code is rejected when
+      // the address is entered with different casing.
       const otpRecord = await prisma.otpRecord.findFirst({
         where: {
-          email,
-          code,
+          email: { equals: email.trim(), mode: "insensitive" },
+          code: code.trim(),
           expires_at: {
             gt: new Date(),
           },
         },
+        orderBy: { created_at: "desc" },
       });
 
       if (!otpRecord) {
@@ -188,9 +193,10 @@ export class AuthService {
 
   async resetPassword(email: string, newPassword: string) {
     try {
-      // Find user by email
-      const user = await prisma.userProfile.findUnique({
-        where: { email },
+      // Find user by email (case-insensitive — the email may be entered with
+      // different casing than it was stored).
+      const user = await prisma.userProfile.findFirst({
+        where: { email: { equals: email.trim(), mode: "insensitive" } },
       });
 
       if (!user) {
