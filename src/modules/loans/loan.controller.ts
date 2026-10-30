@@ -59,6 +59,16 @@ export const createLoan = asyncHandler(async (req: Request, res: Response) => {
     throw new AppError(404, `User with ID ${borrowerId} not found`);
   }
 
+  // A loan must belong to a real borrower, never a staff/admin account. Rows
+  // addressed to staff are what caused reminders/emails to reach people who
+  // don't actually hold the loan (see fix_loan_borrower.mjs).
+  if (borrower.role !== "user") {
+    throw new AppError(
+      400,
+      `Cannot create a loan for a ${borrower.role} account. Select the actual borrower.`
+    );
+  }
+
   console.log(`[LOAN CREATE] ${isAdmin ? "Admin" : "User"} ${req.user.sub} creating loan for ${borrowerId} (${borrower.email})`);
 
   const loan = await loanService.createLoan(

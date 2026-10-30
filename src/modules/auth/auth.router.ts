@@ -2,12 +2,17 @@ import { Router, type Router as ExpressRouter } from "express";
 import {
   generateOTP,
   verifyOTP,
+  completeSignup,
   getProfile,
   updateProfile,
   changePassword,
   resetPassword,
 } from "./auth.controller.js";
-import { verifySupabaseToken, requireAuth } from "../../middlewares/auth.middleware.js";
+import {
+  verifySupabaseToken,
+  verifySupabaseAuthOnly,
+  requireAuth,
+} from "../../middlewares/auth.middleware.js";
 
 const router: ExpressRouter = Router();
 
@@ -15,6 +20,8 @@ const router: ExpressRouter = Router();
 router.post("/otp/generate", generateOTP);
 router.post("/otp/verify", verifyOTP);
 router.post("/reset-password", resetPassword);
+// Post-signup hook (token-only: the profile may be created by this call)
+router.post("/complete-signup", verifySupabaseAuthOnly, completeSignup);
 
 // Protected routes
 router.use(verifySupabaseToken);

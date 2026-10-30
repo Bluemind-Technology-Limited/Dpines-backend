@@ -6,6 +6,8 @@ declare global {
   namespace Express {
     interface Request {
       user?: any;
+      /** Raw Supabase identity, set by verifySupabaseAuthOnly (profile may not exist yet). */
+      authUser?: { id: string; email?: string; firstName?: string; lastName?: string };
       /** Set when an admin is impersonating another user ("Admin Mode"). */
       impersonator?: any;
     }
@@ -109,6 +111,40 @@ export const verifySupabaseToken = async (
     if (error instanceof AppError) {
       return next(error);
     }
+    return next(new AppError(401, "Authentication failed"));
+  }
+};
+
+// Verifies the Supabase JWT and attaches the raw identity to req.authUser WITHOUT
+// requiring a user_profiles row. Used by the signup-completion endpoint, which
+// may run before the profile exists.
+export const verifySupabaseAuthOnly = async (
+  req: Request,
+  _res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    if (!token) {
+      return next(new AppError(401, "No authorization token provided"));
+    }
+
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data.user) {
+      return next(new AppError(401, "Invalid or expired token"));
+    }
+
+    const meta = (data.user.user_metadata || {}) as Record<string, unknown>;
+    req.authUser = {
+      id: data.user.id,
+      email: data.user.email ?? (meta.email as string | undefined),
+      firstName: meta.first_name as string | undefined,
+      lastName: meta.last_name as string | undefined,
+    };
+
+    next();
+  } catch (error) {
+    if (error instanceof AppError) return next(error);
     return next(new AppError(401, "Authentication failed"));
   }
 };

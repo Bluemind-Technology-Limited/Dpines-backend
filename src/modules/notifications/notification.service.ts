@@ -436,6 +436,29 @@ export class NotificationService {
         where: { id: loan.user_id },
       });
 
+      // Resolve a real recipient before doing anything else. A missing profile
+      // means there is nobody to remind.
+      if (!user || !user.email) {
+        console.warn(`[REMINDER] Skipping loan ${loanId}: owner profile has no email`);
+        return;
+      }
+
+      // A loan row addressed to a staff/admin account is bad data (see
+      // backend/fix_loan_borrower.mjs). Never email a reminder to someone who
+      // isn't the borrower.
+      if (user.role !== "user") {
+        console.warn(
+          `[REMINDER] Skipping loan ${loanId}: owner ${user.email} has role "${user.role}"`
+        );
+        return;
+      }
+
+      // Don't nag about a loan that is already fully repaid (stale `active` rows).
+      if (Number((loan as any).principal_balance ?? 0) <= 0) {
+        console.warn(`[REMINDER] Skipping loan ${loanId}: principal balance is 0`);
+        return;
+      }
+
       await this.createNotification({
         userId: loan.user_id,
         title: "Loan Payment Due Soon",
@@ -452,10 +475,10 @@ export class NotificationService {
       // Send email via Resend
       if (preferences.emailNotifications) {
         await emailService.sendEmailWithRetry(
-          user?.email || "",
+          user.email,
           "loan_payment_reminder",
           {
-            firstName: user?.first_name || "User",
+            firstName: user.first_name || "User",
             daysUntilDue,
             amountDue: amountDue || loan.monthly_payment,
           }

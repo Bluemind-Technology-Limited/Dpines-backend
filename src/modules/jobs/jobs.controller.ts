@@ -2,6 +2,7 @@ import { Request, Response, Router, type Router as ExpressRouter } from "express
 import { jobsService } from "../../services/jobs.service.js";
 import { asyncHandler } from "../../middlewares/async.middleware.js";
 import { authenticate, adminOnly } from "../../middlewares/auth.middleware.js";
+import { requireCronAuth } from "../../middlewares/qstash.middleware.js";
 import { AppError } from "../../middlewares/error.middleware.js";
 
 const router: ExpressRouter = Router();
@@ -34,12 +35,8 @@ router.post(
 // POST /api/jobs/trigger/payment_reminders - Manually trigger payment reminder job (for testing/cron) - Can be called by QStash cron or manual test
 router.post(
   "/trigger/payment_reminders",
-  asyncHandler(async (req: Request, res: Response) => {
-    const cronKey = req.headers["x-cron-key"];
-    if (process.env.CRON_KEY && cronKey !== process.env.CRON_KEY) {
-      throw new AppError(401, "Unauthorized: Invalid Cron Key");
-    }
-
+  requireCronAuth,
+  asyncHandler(async (_req: Request, res: Response) => {
     // Run asynchronously in the background to prevent HTTP timeouts
     jobsService.executePaymentReminders().catch((err) => {
       console.error("Background payment reminders execution failed:", err);
@@ -55,12 +52,8 @@ router.post(
 // POST /api/jobs/trigger/late_fees - Manually trigger late fee application job (for testing/cron) - Can be called by QStash cron or manual test
 router.post(
   "/trigger/late_fees",
-  asyncHandler(async (req: Request, res: Response) => {
-    const cronKey = req.headers["x-cron-key"];
-    if (process.env.CRON_KEY && cronKey !== process.env.CRON_KEY) {
-      throw new AppError(401, "Unauthorized: Invalid Cron Key");
-    }
-
+  requireCronAuth,
+  asyncHandler(async (_req: Request, res: Response) => {
     // Run asynchronously in the background to prevent HTTP timeouts
     jobsService.executeLateFeeApplication().catch((err) => {
       console.error("Background late fee execution failed:", err);
@@ -76,12 +69,8 @@ router.post(
 // POST /api/jobs/trigger/maturity - Manually trigger maturity processing job (for testing/cron) - Can be called by QStash cron or manual test
 router.post(
   "/trigger/maturity",
-  asyncHandler(async (req: Request, res: Response) => {
-    const cronKey = req.headers["x-cron-key"];
-    if (process.env.CRON_KEY && cronKey !== process.env.CRON_KEY) {
-      throw new AppError(401, "Unauthorized: Invalid Cron Key");
-    }
-
+  requireCronAuth,
+  asyncHandler(async (_req: Request, res: Response) => {
     // Run asynchronously in the background to prevent HTTP timeouts
     jobsService.executeMaturityProcessing().catch((err) => {
       console.error("Background maturity processing execution failed:", err);

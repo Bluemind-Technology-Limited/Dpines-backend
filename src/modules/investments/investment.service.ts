@@ -158,6 +158,7 @@ export class InvestmentService {
     try {
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: { users: true },
       });
 
       if (!investment) {
@@ -196,6 +197,32 @@ export class InvestmentService {
         console.error("[LEDGER] Failed to log investment approval:", ledgerError);
       }
 
+      // Notify the investor that their contribution is now active.
+      if ((investment as any).users) {
+        const user = (investment as any).users;
+        const userName =
+          `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Investor";
+        edgeFunctionService
+          .sendInvestmentApprovedEmail({
+            to: user.email,
+            userName,
+            investmentId: approvedInvestment.id,
+            amount: Number(approvedInvestment.amount),
+            interestRate: Number(approvedInvestment.interest_rate),
+            termMonths: Number(approvedInvestment.term_months),
+            payoutFrequency: String(approvedInvestment.payout_frequency),
+            startDate: new Date(approvedInvestment.start_date ?? start_date).toISOString(),
+            endDate: new Date(approvedInvestment.end_date ?? end_date).toISOString(),
+            currentValue: Number(approvedInvestment.current_value),
+          })
+          .catch((err) => {
+            console.error(
+              "Failed to trigger investment approved email edge function:",
+              err
+            );
+          });
+      }
+
       return approvedInvestment;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -210,6 +237,7 @@ export class InvestmentService {
     try {
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: { users: true },
       });
 
       if (!investment) {
@@ -238,6 +266,28 @@ export class InvestmentService {
         );
       } catch (ledgerError) {
         console.error("[LEDGER] Failed to log investment rejection:", ledgerError);
+      }
+
+      // Notify the investor that the application was declined.
+      if ((investment as any).users) {
+        const user = (investment as any).users;
+        const userName =
+          `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Investor";
+        edgeFunctionService
+          .sendInvestmentRejectedEmail({
+            to: user.email,
+            userName,
+            investmentId: rejectedInvestment.id,
+            rejectionReason,
+            amount: Number(rejectedInvestment.amount),
+            termMonths: Number(rejectedInvestment.term_months),
+          })
+          .catch((err) => {
+            console.error(
+              "Failed to trigger investment rejected email edge function:",
+              err
+            );
+          });
       }
 
       return rejectedInvestment;

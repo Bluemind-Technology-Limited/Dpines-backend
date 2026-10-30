@@ -2,28 +2,32 @@ name: Scheduled Background Jobs
 
 on:
   schedule:
-    # Run daily at 9:00 AM UTC
+    # Run daily at 09:00 UTC (10:00 WAT)
     - cron: '0 9 * * *'
-  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
 
 jobs:
-  run-jobs:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Payment Reminders
+      # GitHub Actions is the scheduler of record (visible history, manual
+      # dispatch, easy edits). It does NOT call the backend directly — it
+      # publishes each sweep to QStash, which handles delivery, retries and
+      # signing. The backend verifies the Upstash-Signature on arrival
+      # (see requireCronAuth in src/middlewares/qstash.middleware.ts).
+      - name: Enqueue sweeps via QStash
+        env:
+          QSTASH_TOKEN: ${{ secrets.QSTASH_TOKEN }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
-          curl -X POST "https://dpines-backend.vercel.app/api/jobs/trigger/payment_reminders" \
-            -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
-            -H "Content-Type: application/json"
-
-      - name: Trigger Late Fee Application
-        run: |
-          curl -X POST "https://dpines-backend.vercel.app/api/jobs/trigger/late_fees" \
-            -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
-            -H "Content-Type: application/json"
-
-      - name: Trigger Maturity Processing
-        run: |
-          curl -X POST "https://dpines-backend.vercel.app/api/jobs/trigger/maturity" \
-            -H "X-Cron-Key: ${{ secrets.CRON_KEY }}" \
-            -H "Content-Type: application/json"
+          set -euo pipefail
+          for job in payment_reminders late_fees maturity; do
+            echo "→ enqueuing ${job}"
+            curl -fsS -X POST \
+              "https://qstash.upstash.io/v2/publish/${BACKEND_URL}/api/jobs/trigger/${job}" \
+              -H "Authorization: Bearer ${QSTASH_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -H "Upstash-Retries: 3" \
+              -d '{}'
+            echo
+          done

@@ -101,9 +101,6 @@ class JobsService {
             not: null,
           },
         },
-        include: {
-          user_profile: true,
-        },
       });
 
       let successCount = 0;

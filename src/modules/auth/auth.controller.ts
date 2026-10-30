@@ -29,6 +29,7 @@ const changePasswordSchema = z.object({
 
 const resetPasswordSchema = z.object({
   email: z.string().email(),
+  code: z.string().length(6, "OTP must be 6 digits"),
   newPassword: z.string().min(6),
 });
 
@@ -51,9 +52,45 @@ export const generateOTP = asyncHandler(async (req: Request, res: Response) => {
 export const verifyOTP = asyncHandler(async (req: Request, res: Response) => {
   const body = verifyOTPSchema.parse(req.body);
 
-  const verified = await authService.verifyOTP(body.email, body.code);
+  // Non-consuming check: lets the Verify-OTP screen validate the code without
+  // spending it, so /reset-password remains the single consumer.
+  const verified = await authService.checkOTP(body.email, body.code);
 
   sendSuccess(res, { verified }, "OTP verified successfully");
+});
+
+// Called by the client right after Supabase sign-up. Ensures the profile exists
+// and dispatches the welcome email exactly once.
+export const completeSignup = asyncHandler(async (req: Request, res: Response) => {
+  if (!req.authUser) {
+    throw new AppError(401, "Unauthorized");
+  }
+
+  const profile = await authService.completeSignup(req.authUser.id, {
+    email: req.authUser.email,
+    firstName: req.authUser.firstName,
+    lastName: req.authUser.lastName,
+  });
+
+  const mappedUser = {
+    id: profile.id,
+    email: profile.email,
+    firstName: profile.first_name,
+    lastName: profile.last_name,
+    role: profile.role,
+    phoneNumber: profile.phone_number,
+    address: profile.address,
+    avatarUrl: profile.avatar_url,
+    createdAt: profile.created_at,
+    isActiveInvestor: profile.is_active_investor,
+    metadata: profile.metadata
+      ? typeof profile.metadata === "string"
+        ? JSON.parse(profile.metadata)
+        : profile.metadata
+      : {},
+  };
+
+  sendSuccess(res, mappedUser, "Signup completed successfully");
 });
 
 export const getProfile = asyncHandler(async (req: Request, res: Response) => {
@@ -130,7 +167,7 @@ export const resetPassword = asyncHandler(
   async (req: Request, res: Response) => {
     const body = resetPasswordSchema.parse(req.body);
 
-    await authService.resetPassword(body.email, body.newPassword);
+    await authService.resetPassword(body.email, body.code, body.newPassword);
 
     sendSuccess(res, {}, "Password reset successfully");
   }

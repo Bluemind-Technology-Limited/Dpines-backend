@@ -117,6 +117,73 @@ export class EdgeFunctionService {
     });
   }
 
+  // Loan Rejection Email
+  async sendLoanRejectedEmail(params: {
+    to: string;
+    userName: string;
+    loanId: string;
+    rejectionReason: string;
+    amount?: number;
+    monthlyPayment?: number;
+    termMonths?: number;
+  }) {
+    return this.callFunction("send-loan-rejected-email", {
+      loan_id: params.loanId,
+      user_email: params.to,
+      user_name: params.userName,
+      rejection_reason: params.rejectionReason,
+      loan_amount: params.amount,
+      monthly_payment: params.monthlyPayment,
+      term_months: params.termMonths,
+    });
+  }
+
+  // Investment Approval Email
+  async sendInvestmentApprovedEmail(params: {
+    to: string;
+    userName: string;
+    investmentId: string;
+    amount: number;
+    interestRate: number;
+    termMonths: number;
+    payoutFrequency: string;
+    startDate: string;
+    endDate: string;
+    currentValue?: number;
+  }) {
+    return this.callFunction("send-investment-approved-email", {
+      investment_id: params.investmentId,
+      user_email: params.to,
+      user_name: params.userName,
+      amount: params.amount,
+      interest_rate: params.interestRate,
+      term_months: params.termMonths,
+      payout_frequency: params.payoutFrequency,
+      start_date: params.startDate,
+      end_date: params.endDate,
+      current_value: params.currentValue,
+    });
+  }
+
+  // Investment Rejection Email
+  async sendInvestmentRejectedEmail(params: {
+    to: string;
+    userName: string;
+    investmentId: string;
+    rejectionReason: string;
+    amount?: number;
+    termMonths?: number;
+  }) {
+    return this.callFunction("send-investment-rejected-email", {
+      investment_id: params.investmentId,
+      user_email: params.to,
+      user_name: params.userName,
+      rejection_reason: params.rejectionReason,
+      amount: params.amount,
+      term_months: params.termMonths,
+    });
+  }
+
   // Investment Payout Notification Email
   async sendPayoutNotificationEmail(
     to: string,

@@ -468,6 +468,7 @@ export class LoanService {
     try {
       const loan = await prisma.loan.findUnique({
         where: { id: loanId },
+        include: { users: true },
       });
 
       if (!loan) {
@@ -495,6 +496,26 @@ export class LoanService {
         );
       } catch (ledgerError) {
         console.error("[LEDGER] Failed to log loan rejection:", ledgerError);
+      }
+
+      // Notify the borrower that the application was declined.
+      if ((loan as any).users) {
+        const user = (loan as any).users;
+        const userName =
+          `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Borrower";
+        edgeFunctionService
+          .sendLoanRejectedEmail({
+            to: user.email,
+            userName,
+            loanId: rejectedLoan.id,
+            rejectionReason: rejectionReason || "No reason provided",
+            amount: Number(rejectedLoan.amount),
+            monthlyPayment: Number(rejectedLoan.monthly_payment),
+            termMonths: Number(rejectedLoan.term_months),
+          })
+          .catch((err) => {
+            console.error("Failed to trigger loan rejected email edge function:", err);
+          });
       }
 
       return rejectedLoan as unknown as Loan;

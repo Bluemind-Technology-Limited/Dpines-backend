@@ -695,6 +695,7 @@ model otp_records {
   id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
   email      String
   code       String
+  attempts   Int      @default(0)
   expires_at DateTime @db.Timestamptz(6)
   created_at DateTime @default(now()) @db.Timestamptz(6)
 
