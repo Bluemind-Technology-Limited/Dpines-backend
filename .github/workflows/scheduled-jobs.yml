@@ -24,6 +24,12 @@ jobs:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
           set -euo pipefail
+          if [ -z "${BACKEND_URL}" ]; then
+            echo "BACKEND_URL is empty."
+            echo "Set the BACKEND_URL Actions secret to the API origin, e.g. https://your-backend.vercel.app (no trailing slash), then re-run."
+            exit 1
+          fi
+          BACKEND_URL="${BACKEND_URL%/}"
           for job in payment_reminders late_fees maturity; do
             echo "→ enqueuing ${job}"
             curl -fsS -X POST \
