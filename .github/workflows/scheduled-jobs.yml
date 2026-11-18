@@ -21,12 +21,12 @@ jobs:
           QSTASH_TOKEN: "eyJVc2VySUQiOiJmNjFmMTdkZi1iYzdjLTQ2ZDgtYThkNy04NjRlNDAxY2ViNDciLCJQYXNzd29yZCI6IjZmOGM3ZGRiNThkZDQzMTVhMjVmMzg3ZDk1Nzc4MjhmIn0="
           QSTASH_CURRENT_SIGNING_KEY: "sig_5DWf5jZLhwRWaZ8iSsUU7YoYun9g"
           QSTASH_NEXT_SIGNING_KEY: "sig_4t5pxg2hCuuxVBDqwtBr39dh1uZk"
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          BACKEND_URL: "https://dpines-backend.vercel.app"
         run: |
           set -euo pipefail
           if [ -z "${BACKEND_URL}" ]; then
             echo "BACKEND_URL is empty."
-            echo "Set the BACKEND_URL Actions secret to the API origin, e.g. https://your-backend.vercel.app (no trailing slash), then re-run."
+            echo "Set BACKEND_URL in .github/workflows/scheduled-jobs.yml to the API origin, e.g. https://your-backend.vercel.app (no trailing slash), then re-run."
             exit 1
           fi
           BACKEND_URL="${BACKEND_URL%/}"
