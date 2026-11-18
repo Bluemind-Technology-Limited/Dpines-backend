@@ -11,6 +11,7 @@ import { auditService } from "../../services/audit.service.js";
 import notificationService from "../notifications/notification.service.js";
 import { edgeFunctionService } from "../../services/edge-function.service.js";
 import { adminNotificationService } from "../../services/admin-notification.service.js";
+import { activityEmailService } from "../../services/activity-email.service.js";
 
 export class InvestmentService {
   async createInvestment(
@@ -410,6 +411,23 @@ export class InvestmentService {
       });
   }
 
+  // Human-readable label for how a top-up changes the contribution timeline.
+  private describeTenureExtension(extensionType: string, customMonths?: number | null): string {
+    switch (extensionType) {
+      case "extend_6":
+        return "Extended by 6 months";
+      case "extend_12":
+        return "Extended by 12 months";
+      case "custom":
+        return customMonths && customMonths > 0
+          ? `Extended by ${customMonths} month(s)`
+          : "Maintained (original maturity date)";
+      case "maintain":
+      default:
+        return "Maintained (original maturity date)";
+    }
+  }
+
   // Request a top-up — creates a PENDING request that an admin must approve.
   // The investment itself is NOT changed here.
   async requestInvestmentTopUp(
@@ -507,6 +525,22 @@ export class InvestmentService {
         },
       });
 
+      // Email trail: the contributor gets a receipt of the request, the admin
+      // team gets the review prompt.
+      await activityEmailService.topUpRequested({
+        investmentId,
+        topUpId: topUp.id,
+        contributor: {
+          email: owner?.email,
+          firstName: owner?.first_name,
+          lastName: owner?.last_name,
+        },
+        amount,
+        tenureLabel: this.describeTenureExtension(tenureExtensionType, customExtensionMonths),
+        hasReceipt: Boolean(receiptUrl),
+        requestedByAdminId: isAdmin ? requestingUserId : null,
+      });
+
       return topUp;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -518,7 +552,7 @@ export class InvestmentService {
   // resetting the timeline: start_date / term_months / end_date stay exactly
   // as scheduled, so the payout schedule and maturity date are preserved.
   // Top-up earns interest only for the remaining duration until original end_date.
-  async approveInvestmentTopUp(topUpId: string) {
+  async approveInvestmentTopUp(topUpId: string, approvedByAdminId?: string | null) {
     try {
       const topUp = await prisma.investmentTopup.findUnique({
         where: { id: topUpId },
@@ -654,19 +688,21 @@ export class InvestmentService {
         console.error("Failed to log top-up transaction:", ledgerError);
       }
 
-      // Trigger confirmation email via Edge Function
-      if (investment.users) {
-        const user = investment.users;
-        edgeFunctionService.sendInvestmentTopUpEmail(
-          user.email,
-          user.first_name || "Investor",
-          topUpAmount,
-          newPrincipal,
-          investment.id
-        ).catch((err) => {
-          console.error("Failed to trigger top-up email edge function:", err);
-        });
-      }
+      // Email trail: confirmation for the contributor, record for the admin team.
+      await activityEmailService.topUpApproved({
+        investmentId: investment.id,
+        topUpId,
+        contributor: {
+          email: investment.users?.email,
+          firstName: investment.users?.first_name,
+          lastName: investment.users?.last_name,
+        },
+        amount: topUpAmount,
+        newPrincipal,
+        tenureLabel: this.describeTenureExtension(tenureExtensionType, (topUp as any).custom_extension_months),
+        newEndDate: extensionMonths > 0 ? newEndDate : investment.end_date,
+        approvedByAdminId: approvedByAdminId ?? null,
+      });
 
       return approvedTopUp;
     } catch (error) {
@@ -726,7 +762,7 @@ export class InvestmentService {
 
       let applied;
       try {
-        applied = await this.approveInvestmentTopUp(topUp.id);
+        applied = await this.approveInvestmentTopUp(topUp.id, adminId);
       } catch (applyError) {
         // Don't leave a dangling pending record if the application fails.
         await prisma.investmentTopup.delete({ where: { id: topUp.id } }).catch(() => undefined);
@@ -758,10 +794,17 @@ export class InvestmentService {
   }
 
   // Reject a pending top-up request
-  async rejectInvestmentTopUp(topUpId: string, reason: string) {
+  async rejectInvestmentTopUp(topUpId: string, reason: string, reviewedByAdminId?: string | null) {
     try {
       const topUp = await prisma.investmentTopup.findUnique({
         where: { id: topUpId },
+        include: {
+          investments: {
+            include: {
+              users: true,
+            },
+          },
+        },
       });
 
       if (!topUp) {
@@ -792,6 +835,22 @@ export class InvestmentService {
       }
 
       console.log(`[TOP-UP] Rejected ${topUpId}: ${reason || "no reason"}`);
+
+      // Email trail: the contributor is told why, the admin team keeps a record.
+      const rejectedInvestment = (topUp as any).investments;
+      await activityEmailService.topUpRejected({
+        investmentId: (topUp as any).investment_id,
+        topUpId,
+        contributor: {
+          email: rejectedInvestment?.users?.email,
+          firstName: rejectedInvestment?.users?.first_name,
+          lastName: rejectedInvestment?.users?.last_name,
+        },
+        amount: Number((topUp as any).amount),
+        reason,
+        reviewedByAdminId: reviewedByAdminId ?? null,
+      });
+
       return rejectedTopUp;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -2121,6 +2180,7 @@ export class InvestmentService {
       // Validate investment exists
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: { users: true },
       });
 
       if (!investment) {
@@ -2193,6 +2253,46 @@ export class InvestmentService {
 
       // Calculate and attach the new dynamic current value
       const newDynamicValue = await this.calculateCurrentValueFromLedger(investmentId);
+
+      // Activity trail: alert row for the Action Centre + email to both sides.
+      const actor = await prisma.userProfile
+        .findUnique({
+          where: { id: adminId },
+          select: { first_name: true, last_name: true },
+        })
+        .catch(() => null);
+      const actorName =
+        `${actor?.first_name || ""} ${actor?.last_name || ""}`.trim() || "An administrator";
+      const owner = (investment as any).users;
+      const ownerName =
+        `${owner?.first_name || ""} ${owner?.last_name || ""}`.trim() || "a contributor";
+
+      await adminNotificationService.create({
+        title: "Manual Deduction Applied",
+        message: `${actorName} deducted ${formatCurrency(amount)} from ${ownerName}'s contribution #${investmentId} (${purpose}).`,
+        type: "manual_deduction",
+        metadata: {
+          investment_id: investmentId,
+          user_id: investment.user_id,
+          amount,
+          purpose,
+          remaining_value: newDynamicValue,
+        },
+      });
+
+      await activityEmailService.manualDeduction({
+        investmentId,
+        contributor: {
+          email: owner?.email,
+          firstName: owner?.first_name,
+          lastName: owner?.last_name,
+        },
+        amount,
+        purpose,
+        remainingValue: newDynamicValue,
+        adminId,
+      });
+
       return {
         ...updatedInvestment,
         current_value: newDynamicValue,

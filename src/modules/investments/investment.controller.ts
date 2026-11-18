@@ -281,7 +281,9 @@ export const adminApplyTopUp = asyncHandler(
 export const approveInvestmentTopUp = asyncHandler(
   async (req: Request, res: Response) => {
     const { topUpId } = req.params;
-    const topUp = await investmentService.approveInvestmentTopUp(topUpId);
+    // Attribute to the acting admin, even when an admin is impersonating.
+    const adminId = (req as any).impersonator?.sub ?? (req as any).user?.sub ?? null;
+    const topUp = await investmentService.approveInvestmentTopUp(topUpId, adminId);
     sendSuccess(res, topUp, "Top-up approved and applied");
   }
 );
@@ -291,7 +293,8 @@ export const rejectInvestmentTopUp = asyncHandler(
   async (req: Request, res: Response) => {
     const { topUpId } = req.params;
     const body = rejectTopUpSchema.parse(req.body);
-    const topUp = await investmentService.rejectInvestmentTopUp(topUpId, body.reason);
+    const adminId = (req as any).impersonator?.sub ?? (req as any).user?.sub ?? null;
+    const topUp = await investmentService.rejectInvestmentTopUp(topUpId, body.reason, adminId);
     sendSuccess(res, topUp, "Top-up request rejected");
   }
 );

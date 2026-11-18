@@ -4,6 +4,7 @@ import prisma from "../../configs/database.js";
 import { AppError } from "../../middlewares/error.middleware.js";
 import { LedgerService } from "../../services/ledger.service.js";
 import { AuditService } from "../../services/audit.service.js";
+import { activityEmailService } from "../../services/activity-email.service.js";
 
 const ledgerService = new LedgerService();
 const auditService = new AuditService();
@@ -79,6 +80,7 @@ export class DeductionService {
       // Fetch investment
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: { users: true },
       });
       if (!investment) {
         throw new AppError(404, "Investment not found");
@@ -168,6 +170,20 @@ export class DeductionService {
           loanNewBalance: newLoanBalance,
           reason,
         },
+      });
+
+      // Email trail for both sides (never blocks the committed operation).
+      await activityEmailService.manualDeduction({
+        investmentId,
+        contributor: {
+          email: investment.users?.email,
+          firstName: investment.users?.first_name,
+          lastName: investment.users?.last_name,
+        },
+        amount,
+        purpose: `${reason} — applied to loan #${loanId.slice(-6)}`,
+        remainingValue: newInvestmentValue,
+        adminId,
       });
 
       return {
@@ -397,6 +413,7 @@ export class DeductionService {
       // Fetch investment
       const investment = await prisma.investment.findUnique({
         where: { id: investmentId },
+        include: { users: true },
       });
       if (!investment) {
         throw new AppError(404, "Investment not found");
@@ -448,6 +465,20 @@ export class DeductionService {
           investmentNewValue: newValue,
           reason,
         },
+      });
+
+      // Email trail: the contributor learns about the withdrawal, admins keep a record.
+      await activityEmailService.manualDeduction({
+        investmentId,
+        contributor: {
+          email: investment.users?.email,
+          firstName: investment.users?.first_name,
+          lastName: investment.users?.last_name,
+        },
+        amount,
+        purpose: `Manual withdrawal: ${reason}`,
+        remainingValue: newValue,
+        adminId,
       });
 
       return {
