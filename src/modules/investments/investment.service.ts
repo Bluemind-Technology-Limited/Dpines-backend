@@ -299,7 +299,7 @@ export class InvestmentService {
 
   async setMaturityAction(
     investmentId: string,
-    action: "withdraw" | "rollover"
+    action: "withdraw" | "rollover" | null
   ): Promise<Investment> {
     try {
       const investment = await prisma.investment.findUnique({
@@ -313,7 +313,9 @@ export class InvestmentService {
         throw new AppError(404, "Investment not found");
       }
 
-      if (investment.status !== "active") {
+      // Selecting a new action requires an active investment, but clearing an
+      // existing request (admin decline) must also work once it has matured.
+      if (action !== null && investment.status !== "active") {
         throw new AppError(400, "Investment is not active");
       }
 
@@ -330,7 +332,9 @@ export class InvestmentService {
           investment.user_id,
           investmentId,
           "maturity_action",
-          `Maturity action selected: ${action}`
+          action
+            ? `Maturity action selected: ${action}`
+            : "Maturity action request cleared"
         );
       } catch (ledgerError) {
         console.error("[LEDGER] Failed to log maturity action:", ledgerError);

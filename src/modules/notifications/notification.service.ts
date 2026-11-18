@@ -1,6 +1,7 @@
 // Notification Service - Phase 5.1 - Comprehensive notification system for DPINES platform - Supports: - - Email notifications - - SMS notifications - - In-app notifications - - Notification preferences & history - - Bulk notification dispatching - Integration points: - - Loan payment reminders - - Investment maturity alerts - - Default/late fee notifications - - Administrative notifications - - System alerts
 
 import prisma from "../../configs/database.js";
+import { env } from "../../configs/env.js";
 import { AppError } from "../../middlewares/error.middleware.js";
 import emailService from "../../services/email.service.js";
 
@@ -614,7 +615,7 @@ export class NotificationService {
     paymentDate: string;
   }): Promise<{ success: boolean; error?: string }> {
     try {
-      const url = `${process.env.SUPABASE_URL}/functions/v1/send-loan-reminder`;
+      const url = `${env.SUPABASE_URL}/functions/v1/send-loan-reminder`;
       
       console.log(`[NOTIFICATION] Calling send-loan-reminder edge function for loan ${params.loanId}`);
       

@@ -152,7 +152,11 @@ export const setMaturityAction = asyncHandler(
       body.action
     );
 
-    sendSuccess(res, investment, "Maturity action set successfully");
+    sendSuccess(
+      res,
+      investment,
+      body.action ? "Maturity action set successfully" : "Maturity action cleared"
+    );
   }
 );
 

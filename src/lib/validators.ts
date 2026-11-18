@@ -51,8 +51,10 @@ export const rejectInvestmentSchema = z.object({
   rejectionReason: z.string().min(1, "Rejection reason is required"),
 });
 
+// `null` clears a previously selected maturity action, used when an admin
+// declines a withdraw/rollover request.
 export const setMaturityActionSchema = z.object({
-  action: z.enum(["withdraw", "rollover"]),
+  action: z.enum(["withdraw", "rollover"]).nullable(),
 });
 
 // Ticket Validators
