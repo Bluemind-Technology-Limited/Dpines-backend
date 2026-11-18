@@ -4,10 +4,15 @@ import { auditService } from "../../services/audit.service.js";
 import type { UserProfile, UserRole } from "../../types/index.js";
 
 export class UserService {
+  // Supabase keeps the auth.users row when an account is soft-deleted
+  // (deleted_at set). The profile row survives, so every admin lookup below
+  // must explicitly exclude those accounts from the directory and search.
+  private readonly activeAccount = { users: { deleted_at: null } } as any;
+
   async getUserById(userId: string): Promise<UserProfile | null> {
     try {
-      const user = await prisma.userProfile.findUnique({
-        where: { id: userId },
+      const user = await prisma.userProfile.findFirst({
+        where: { id: userId, ...this.activeAccount },
       });
 
       return user;
@@ -30,8 +35,10 @@ export class UserService {
 
   async getAllUsers(skip: number = 0, take: number = 10) {
     try {
+      const where = this.activeAccount;
       const [users, total] = await Promise.all([
         prisma.userProfile.findMany({
+          where,
           skip,
           take,
           orderBy: {
@@ -52,7 +59,7 @@ export class UserService {
             updated_at: true,
           },
         }),
-        prisma.userProfile.count(),
+        prisma.userProfile.count({ where }),
       ]);
 
       return { users, total };
@@ -240,11 +247,16 @@ export class UserService {
     try {
       const users = await prisma.userProfile.findMany({
         where: {
-          OR: [
-            { email: { contains: query, mode: "insensitive" } },
-            { first_name: { contains: query, mode: "insensitive" } },
-            { last_name: { contains: query, mode: "insensitive" } },
-            { phone_number: { contains: query, mode: "insensitive" } },
+          AND: [
+            this.activeAccount,
+            {
+              OR: [
+                { email: { contains: query, mode: "insensitive" } },
+                { first_name: { contains: query, mode: "insensitive" } },
+                { last_name: { contains: query, mode: "insensitive" } },
+                { phone_number: { contains: query, mode: "insensitive" } },
+              ],
+            },
           ],
         },
         skip,
@@ -268,16 +280,18 @@ export class UserService {
 
   async getUsersStats() {
     try {
-      const totalUsers = await prisma.userProfile.count();
+      const where = this.activeAccount;
+      const totalUsers = await prisma.userProfile.count({ where });
       const adminUsers = await prisma.userProfile.count({
-        where: { role: "admin" },
+        where: { ...where, role: "admin" },
       });
       const regularUsers = await prisma.userProfile.count({
-        where: { role: "user" },
+        where: { ...where, role: "user" },
       });
 
       const usersWithLoans = await prisma.userProfile.count({
         where: {
+          ...where,
           loans: {
             some: {},
           },
@@ -286,6 +300,7 @@ export class UserService {
 
       const usersWithInvestments = await prisma.userProfile.count({
         where: {
+          ...where,
           investments: {
             some: {},
           },

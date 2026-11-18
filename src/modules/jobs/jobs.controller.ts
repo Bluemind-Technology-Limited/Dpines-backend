@@ -83,6 +83,21 @@ router.post(
   })
 );
 
+// POST /api/jobs/trigger/reinvestment - Record due reinvestment months for active accounts
+router.post(
+  "/trigger/reinvestment",
+  requireCronAuth,
+  asyncHandler(async (_req: Request, res: Response) => {
+    const result = await jobsService.executeReinvestmentProcessing();
+
+    res.status(result.success ? 200 : 500).json({
+      success: result.success,
+      message: result.message,
+      data: result,
+    });
+  })
+);
+
 // GET /api/jobs/status - Get status of all scheduled jobs
 router.get(
   "/status",
@@ -128,6 +143,7 @@ router.post(
       "payment_reminder",
       "late_fee_application",
       "maturity_processing",
+      "reinvestment_processing",
     ];
 
     if (!jobType || !validJobTypes.includes(jobType)) {

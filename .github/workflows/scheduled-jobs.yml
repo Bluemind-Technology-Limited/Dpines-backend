@@ -17,14 +17,17 @@ jobs:
       # (see requireCronAuth in src/middlewares/qstash.middleware.ts).
       - name: Enqueue sweeps via QStash
         env:
-          QSTASH_TOKEN: ${{ secrets.QSTASH_TOKEN }}
+          QSTASH_URL: "https://qstash-eu-central-1.upstash.io"
+          QSTASH_TOKEN: "eyJVc2VySUQiOiJmNjFmMTdkZi1iYzdjLTQ2ZDgtYThkNy04NjRlNDAxY2ViNDciLCJQYXNzd29yZCI6IjZmOGM3ZGRiNThkZDQzMTVhMjVmMzg3ZDk1Nzc4MjhmIn0="
+          QSTASH_CURRENT_SIGNING_KEY: "sig_5DWf5jZLhwRWaZ8iSsUU7YoYun9g"
+          QSTASH_NEXT_SIGNING_KEY: "sig_4t5pxg2hCuuxVBDqwtBr39dh1uZk"
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
           set -euo pipefail
           for job in payment_reminders late_fees maturity; do
             echo "→ enqueuing ${job}"
             curl -fsS -X POST \
-              "https://qstash.upstash.io/v2/publish/${BACKEND_URL}/api/jobs/trigger/${job}" \
+              "${QSTASH_URL}/v2/publish/${BACKEND_URL}/api/jobs/trigger/${job}" \
               -H "Authorization: Bearer ${QSTASH_TOKEN}" \
               -H "Content-Type: application/json" \
               -H "Upstash-Retries: 3" \

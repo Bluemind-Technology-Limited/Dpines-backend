@@ -4,6 +4,7 @@ import prisma from "../configs/database.js";
 import { loanService } from "../modules/loans/loan.service.js";
 import { investmentService } from "../modules/investments/investment.service.js";
 import notificationService from "../modules/notifications/notification.service.js";
+import { adminNotificationService } from "./admin-notification.service.js";
 import emailService from "./email.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
 
@@ -20,7 +21,7 @@ interface JobResult {
 interface ScheduledJob {
   id: string;
   name: string;
-  type: "payment_reminder" | "late_fee_application" | "maturity_processing";
+  type: "payment_reminder" | "late_fee_application" | "maturity_processing" | "reinvestment_processing";
   schedule: string; // Cron expression
   enabled: boolean;
   lastRun?: Date;
@@ -35,6 +36,7 @@ class JobsService {
   constructor() {
     this.qstash = new Client({
       token: env.QSTASH_TOKEN,
+      baseUrl: env.QSTASH_URL,
     });
     this.baseUrl = env.SITE_URL;
   }
@@ -453,17 +455,110 @@ class JobsService {
     }
   }
 
-  // Schedule All Jobs - Convenience method to schedule all three job types at once
+  // Schedule Reinvestment Accrual Job - Runs daily at 9 AM and records every
+  // due month for active reinvestment accounts (compound growth). The old
+  // implementations ran inside the browser on page load and, before that, in
+  // a database cron job. This is the single, auditable trigger.
+  // Cron: 0 9 * * * (Daily at 9 AM UTC)
+  async scheduleReinvestmentProcessing(): Promise<JobResult> {
+    try {
+      const jobId = `reinvestment_${Date.now()}`;
+
+      const response = await this.qstash.publish({
+        url: `${this.baseUrl}/api/jobs/trigger/reinvestment`,
+        method: "POST",
+        cron: "0 9 * * *", // Daily at 9 AM UTC
+        headers: {
+          "X-Job-ID": jobId,
+          "X-Job-Type": "reinvestment_processing",
+        },
+      });
+
+      await this.logScheduledJob(jobId, "reinvestment_processing", response);
+
+      return {
+        success: true,
+        jobId,
+        message: "Reinvestment processing job scheduled successfully (daily at 9 AM UTC)",
+        details: {
+          schedule: "0 9 * * *",
+          endpoint: "/api/jobs/trigger/reinvestment",
+        },
+      };
+    } catch (error) {
+      console.error("Failed to schedule reinvestment processing:", error);
+      return {
+        success: false,
+        message: "Failed to schedule reinvestment processing",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // Execute Reinvestment Processing Job - records due compound-growth months
+  async executeReinvestmentProcessing(): Promise<JobResult> {
+    try {
+      const result = await investmentService.processReinvestmentAccruals();
+
+      if (result.processedPayouts > 0) {
+        // Visible traceability in the Alert Center for every automated run.
+        await adminNotificationService.create({
+          title: "Scheduled Reinvestment Processing",
+          message:
+            `${result.processedPayouts} month(s) of compound growth recorded across ` +
+            `${result.processedInvestments} investment(s) — ₦${result.totalAmount.toLocaleString()}.`,
+          type: "reinvestment_processing",
+          metadata: {
+            processedPayouts: result.processedPayouts,
+            processedInvestments: result.processedInvestments,
+            failed: result.failed,
+            totalAmount: result.totalAmount,
+            details: result.details,
+          },
+        });
+
+        await this.sendAdminSummaryNotification({
+          jobType: "reinvestment_processing",
+          processedCount: result.processedPayouts,
+          failedCount: result.failed,
+          totalAmount: result.totalAmount,
+          details: {
+            processedInvestments: result.processedInvestments,
+            payoutsRecorded: result.details.length,
+          },
+        });
+      }
+
+      return {
+        success: true,
+        message: "Reinvestment processing executed",
+        processedCount: result.processedPayouts,
+        failedCount: result.failed,
+        details: result,
+      };
+    } catch (error) {
+      console.error("Failed to execute reinvestment processing:", error);
+      return {
+        success: false,
+        message: "Failed to execute reinvestment processing",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // Schedule All Jobs - Convenience method to schedule all job types at once
   async scheduleAllJobs(): Promise<{
     paymentReminders: JobResult;
     lateFees: JobResult;
     maturityProcessing: JobResult;
+    reinvestmentProcessing: JobResult;
     databaseKeepAlive: JobResult;
   }> {
-    const [paymentReminders, lateFees, maturityProcessing, databaseKeepAlive] = await Promise.all([
+    const [paymentReminders, lateFees, maturityProcessing, reinvestmentProcessing, databaseKeepAlive] = await Promise.all([
       this.schedulePaymentReminders(),
       this.scheduleLateFeeApplication(),
       this.scheduleMaturityProcessing(),
+      this.scheduleReinvestmentProcessing(),
       this.scheduleDatabaseKeepAlive(),
     ]);
 
@@ -471,6 +566,7 @@ class JobsService {
       paymentReminders,
       lateFees,
       maturityProcessing,
+      reinvestmentProcessing,
       databaseKeepAlive,
     };
   }
@@ -613,6 +709,14 @@ class JobsService {
         enabled: true,
         nextRun: this.getNextCronRun("0 10 * * *"),
       },
+      {
+        id: "reinvestment_processing",
+        name: "Reinvestment Accruals",
+        type: "reinvestment_processing",
+        schedule: "0 9 * * *",
+        enabled: true,
+        nextRun: this.getNextCronRun("0 9 * * *"),
+      },
     ];
   }
 
@@ -631,7 +735,11 @@ class JobsService {
 
   // Manually Trigger Job (for testing/admin) - Bypasses cron schedule and runs immediately
   async manuallyTriggerJob(
-    jobType: "payment_reminder" | "late_fee_application" | "maturity_processing"
+    jobType:
+      | "payment_reminder"
+      | "late_fee_application"
+      | "maturity_processing"
+      | "reinvestment_processing"
   ): Promise<JobResult> {
     console.log(`Manually triggering ${jobType} job...`);
 
@@ -642,6 +750,8 @@ class JobsService {
         return this.executeLateFeeApplication();
       case "maturity_processing":
         return this.executeMaturityProcessing();
+      case "reinvestment_processing":
+        return this.executeReinvestmentProcessing();
       default:
         return {
           success: false,

@@ -937,7 +937,8 @@ export class InvestmentService {
     payoutMonthNumber: number,
     payoutAmount: number,
     adminId: string,
-    _adminNotes?: string
+    _adminNotes?: string,
+    options: { automated?: boolean; reason?: string } = {}
   ): Promise<Investment> {
     try {
       // Verify investment exists and fetch user data
@@ -985,49 +986,89 @@ export class InvestmentService {
 
       // Mark payout - NO NEED to manually update current_value
       // It will be calculated dynamically from the ledger when needed
-      const updatedMarkedPayouts = [...markedPayouts, payoutMonthNumber];
+      const automated = options.automated === true;
+      const initiator = automated ? "system" : adminId;
+      const ledgerMethod = automated ? "system_generated" : "admin_manual";
 
-      const updatedInvestment = await prisma.investment.update({
-        where: { id: investmentId },
-        data: {
-          marked_payouts: updatedMarkedPayouts,
-          // current_value is no longer manually updated here
-          // It will be calculated from transaction ledger on-demand
-        },
-      });
+      // Re-check and update inside one transaction so a scheduled run and an
+      // admin action can never mark the same month twice, and the ledger entry
+      // commits together with the balance change.
+      const { updatedInvestment, previousMarked } = await prisma.$transaction(
+        async (tx: any) => {
+          const current = await tx.investments.findUnique({
+            where: { id: investmentId },
+          });
+          if (!current) {
+            throw new AppError(404, "Investment not found");
+          }
 
-      // Log transaction - payout distribution
-      // This is the SOURCE OF TRUTH for the withdrawal impact
-      // Pass positive amount - the type "withdrawal" indicates it's being subtracted
-      await ledgerService.logTransaction({
-        userId: investment.user_id,
-        type: "withdrawal" as any,
-        method: "admin_manual" as any,
-        amount: payoutAmount,  // Positive amount - type indicates it's a withdrawal
-        sourceId: investmentId,
-        description: `Investment payout marked - month ${payoutMonthNumber}`,
-        metadata: {
-          payoutMonth: payoutMonthNumber,
-          investmentId,
-          payoutFrequency: investment.payout_frequency,
-          previousMarkedPayouts: markedPayouts.length,
-        },
-      });
+          const currentMarked = Array.isArray(current.marked_payouts)
+            ? current.marked_payouts
+            : [];
+          if (currentMarked.includes(payoutMonthNumber)) {
+            throw new AppError(
+              400,
+              `Payout month ${payoutMonthNumber} already marked as paid`
+            );
+          }
 
-      // Log admin action - audit trail
-      await auditService.logAction({
-        adminId,
-        targetUserId: investment.user_id,
-        action: "manual_adjustment",
-        oldValues: {
-          markedPayouts,
+          const updated = await tx.investments.update({
+            where: { id: investmentId },
+            data: { marked_payouts: [...currentMarked, payoutMonthNumber] },
+          });
+
+          // Log transaction - payout distribution. For reinvestment accounts
+          // this is bookkeeping only (the money stays invested), so the
+          // "Investment payout marked" prefix is preserved for the value
+          // calculator while the metadata makes the automation explicit.
+          await ledgerService.logTransaction(
+            {
+              userId: investment.user_id,
+              type: "withdrawal" as any,
+              method: ledgerMethod as any,
+              amount: payoutAmount,
+              sourceId: investmentId,
+              description:
+                investment.payout_frequency === "reinvestment"
+                  ? `Investment payout marked - month ${payoutMonthNumber} (reinvested)`
+                  : `Investment payout marked - month ${payoutMonthNumber}`,
+              metadata: {
+                payoutMonth: payoutMonthNumber,
+                investmentId,
+                payoutFrequency: investment.payout_frequency,
+                previousMarkedPayouts: currentMarked.length,
+                automated,
+                initiatedBy: automated ? "scheduled_job" : "admin",
+                actorId: initiator,
+                reason: options.reason ?? null,
+              },
+            },
+            tx
+          );
+
+          return { updatedInvestment: updated, previousMarked: currentMarked };
         },
-        newValues: {
-          markedPayouts: updatedMarkedPayouts,
-          payoutMonth: payoutMonthNumber,
-          payoutAmount,
-        },
-      });
+        { timeout: 20000 }
+      );
+
+      // Only human actions belong in the admin audit log. Automated runs leave
+      // their trace in the ledger (method=system_generated) plus the job
+      // summary, so an admin is never falsely credited with the action.
+      if (!automated) {
+        await auditService.logAction({
+          adminId,
+          targetUserId: investment.user_id,
+          action: "manual_adjustment",
+          oldValues: {
+            markedPayouts: previousMarked,
+          },
+          newValues: {
+            markedPayouts: [...previousMarked, payoutMonthNumber],
+            payoutMonth: payoutMonthNumber,
+            payoutAmount,
+          },
+        });
+      }
 
       // Send email notification to user
       try {
@@ -1041,12 +1082,20 @@ export class InvestmentService {
         payoutDate.setMonth(payoutDate.getMonth() + payoutMonthNumber);
 
         if (userEmail) {
-          console.log(`[MARK PAYOUT NOTIFY] Sending payout notification to ${userEmail} for payout #${payoutMonthNumber}`);
-          
+          const isReinvestment = investment.payout_frequency === "reinvestment";
+          const subject = isReinvestment
+            ? `Reinvestment Update - Investment #${investmentId.slice(-6)} - Month ${payoutMonthNumber}`
+            : `Investment Payout #${payoutMonthNumber} - ₦${payoutAmount.toLocaleString()}`;
+          const body = isReinvestment
+            ? `Hello ${userName},\n\nYour month ${payoutMonthNumber} reinvestment of ₦${payoutAmount.toLocaleString()} has been recorded for Investment #${investmentId.slice(-6)}.\n\nThe amount remains invested and continues to compound. This record was generated ${automated ? "automatically by the scheduled reinvestment process" : "by the DPINES team"}.\n\nThank you for investing with DPINES.`
+            : `Hello ${userName},\n\nYour payout for Investment #${investmentId.slice(-6)} has been marked as paid.\n\nPayout Details:\n• Payout Number: ${payoutMonthNumber}\n• Amount: ₦${payoutAmount.toLocaleString()}\n• Date: ${payoutDate.toLocaleDateString('en-NG')}\n• Type: credited to your account\n\nThank you for investing with DPINES.`;
+
+          console.log(`[MARK PAYOUT NOTIFY] Sending payout notification to ${userEmail} for payout #${payoutMonthNumber} (automated=${automated})`);
+
           await edgeFunctionService.callFunction('send-communication', {
             to: userEmail,
-            subject: `Investment Payout #${payoutMonthNumber} - ₦${payoutAmount.toLocaleString()}`,
-            body: `Hello ${userName},\n\nYour payout for Investment #${investmentId.slice(-6)} has been marked as paid.\n\nPayout Details:\n• Payout Number: ${payoutMonthNumber}\n• Amount: ₦${payoutAmount.toLocaleString()}\n• Date: ${payoutDate.toLocaleDateString('en-NG')}\n• Type: credited to your account\n\nThank you for investing with DPINES.`
+            subject,
+            body
           });
 
           console.log(`[MARK PAYOUT NOTIFY] ✓ Notification sent to ${userEmail}`);
@@ -1439,6 +1488,85 @@ export class InvestmentService {
     } catch (error) {
       throw new AppError(500, "Failed to process matured investments");
     }
+  }
+
+  // Process scheduled reinvestment accruals — records every due month for
+  // active reinvestment accounts. This used to run from the browser on page
+  // load (and before that from a pg_cron job); it is now an explicit server job
+  // so the trigger is deterministic and every entry is auditable.
+  async processReinvestmentAccruals(): Promise<{
+    processedInvestments: number;
+    processedPayouts: number;
+    failed: number;
+    totalAmount: number;
+    details: Array<{ investmentId: string; payoutMonth: number; amount: number }>;
+  }> {
+    const now = new Date();
+    const investments = await prisma.investment.findMany({
+      where: {
+        status: "active",
+        payout_frequency: "reinvestment",
+        start_date: { not: null },
+      },
+      select: { id: true },
+      orderBy: { start_date: "asc" },
+    });
+
+    let processedInvestments = 0;
+    let processedPayouts = 0;
+    let failed = 0;
+    let totalAmount = 0;
+    const details: Array<{ investmentId: string; payoutMonth: number; amount: number }> = [];
+
+    for (const { id } of investments) {
+      try {
+        const { payoutSchedule } = await this.getPayoutSchedule(id);
+        const due = payoutSchedule.filter(
+          (payout) => !payout.isPaid && payout.payoutDate <= now
+        );
+        if (due.length === 0) continue;
+
+        let recordedForInvestment = false;
+
+        for (const payout of due) {
+          try {
+            await this.markInvestmentPayout(
+              id,
+              payout.payoutNumber,
+              payout.payoutAmount,
+              "system",
+              undefined,
+              { automated: true, reason: "scheduled_reinvestment_accrual" }
+            );
+            processedPayouts++;
+            totalAmount += payout.payoutAmount;
+            recordedForInvestment = true;
+            details.push({
+              investmentId: id,
+              payoutMonth: payout.payoutNumber,
+              amount: payout.payoutAmount,
+            });
+          } catch (error) {
+            // A concurrent manual mark may win the race; that is not a failure.
+            if (error instanceof AppError && error.statusCode === 400) {
+              continue;
+            }
+            failed++;
+            console.error(
+              `[REINVESTMENT] Failed payout ${payout.payoutNumber} for investment ${id}:`,
+              error
+            );
+          }
+        }
+
+        if (recordedForInvestment) processedInvestments++;
+      } catch (error) {
+        failed++;
+        console.error(`[REINVESTMENT] Failed investment ${id}:`, error);
+      }
+    }
+
+    return { processedInvestments, processedPayouts, failed, totalAmount, details };
   }
 
   // Check if investment is mature and ready for action
