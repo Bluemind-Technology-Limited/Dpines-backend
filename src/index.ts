@@ -39,6 +39,7 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 import prisma from "./configs/database.js";
+import { withDbRetry } from "./lib/db-retry.js";
 
 // Root check
 app.get("/", (_req: Request, res: Response) => {
@@ -54,7 +55,12 @@ app.get("/", (_req: Request, res: Response) => {
 // Health check with Database Keep-Alive query
 app.get("/health", async (_req: Request, res: Response) => {
   try {
-    await prisma.$executeRawUnsafe("SELECT 1");
+    // Retry once or twice: the pooler may have recycled the idle socket.
+    await withDbRetry(() => prisma.$executeRawUnsafe("SELECT 1"), {
+      label: "health check",
+      attempts: 3,
+      baseDelayMs: 150,
+    });
     res.json({ status: "ok", database: "connected", timestamp: new Date().toISOString() });
   } catch (error) {
     res.status(500).json({ status: "error", message: "Database connection failed" });
@@ -99,8 +105,22 @@ const server = app.listen(PORT, async () => {
   console.log(`✓ Environment: ${env.NODE_ENV}`);
   console.log(`✓ CORS enabled for: ${env.CORS_ORIGIN.join(", ")}`);
 
-  // Wait a moment for database connection to establish
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  // Establish the first connection explicitly instead of racing a fixed delay.
+  // The Supabase pooler can take a moment on cold start; if it drops us here we
+  // would otherwise fail the very first query (the template seed).
+  try {
+    await withDbRetry(() => prisma.$executeRawUnsafe("SELECT 1"), {
+      label: "startup warm-up",
+      attempts: 5,
+      baseDelayMs: 400,
+    });
+    console.log("✓ Database connection established");
+  } catch (err) {
+    console.error(
+      "Database warm-up failed — the server is up and will retry on the first request:",
+      err
+    );
+  }
 
   // NOTE: the previous startup job recomputed every loan's rolled_balance from
   // its rollover ledger entries. It is intentionally disabled: rollovers now
@@ -111,17 +131,21 @@ const server = app.listen(PORT, async () => {
 
   // Seed default admin account created template if it doesn't exist
   try {
-    await prisma.communication_templates.upsert({
-      where: { name: "admin_account_created" },
-      update: {},
-      create: {
-        name: "admin_account_created",
-        subject: "Your DPINES Account Has Been Created",
-        body: "Hello {{first_name}},\n\nYour account has been created by the administrator on DPINES Nigeria.\n\nYou can access your account using your email: {{email}}.\n\nTo log in and set up your password, please go to the login screen and click 'Forgot Password' or reset your password using OTP.\n\nThank you,\nDPINES Support",
-        type: "email",
-        is_active: true,
-      },
-    });
+    await withDbRetry(
+      () =>
+        prisma.communication_templates.upsert({
+          where: { name: "admin_account_created" },
+          update: {},
+          create: {
+            name: "admin_account_created",
+            subject: "Your DPINES Account Has Been Created",
+            body: "Hello {{first_name}},\n\nYour account has been created by the administrator on DPINES Nigeria.\n\nYou can access your account using your email: {{email}}.\n\nTo log in and set up your password, please go to the login screen and click 'Forgot Password' or reset your password using OTP.\n\nThank you,\nDPINES Support",
+            type: "email",
+            is_active: true,
+          },
+        }),
+      { label: "seed communication templates" }
+    );
     console.log("✓ Communication templates seeded successfully");
   } catch (err) {
     console.error("Failed to seed default communication templates:", err);

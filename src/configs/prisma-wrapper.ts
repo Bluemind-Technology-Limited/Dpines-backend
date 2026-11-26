@@ -10,12 +10,34 @@ let prismaClient: any;
 // Initialize Prisma with proper connection pooling (KIB-Apps pattern)
 if (process.env.DATABASE_URL) {
   try {
+    const connectionString = process.env.DATABASE_URL;
+
+    // Supabase's pooler closes idle client connections on its own schedule.
+    // If `pg` keeps one of those dead sockets in the pool, the next query fails
+    // with "Connection terminated unexpectedly" before it even runs. So we
+    // recycle idle connections sooner than the pooler does, and keep them warm.
     const pool = new pg.Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: 5,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      connectionString,
+      max: Number(process.env.DB_POOL_MAX || 5),
+      idleTimeoutMillis: 10_000,        // recycle before the pooler drops us
+      connectionTimeoutMillis: 15_000,  // allow for TLS handshake on cold start
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 5_000,
+      allowExitOnIdle: process.env.NODE_ENV !== "production",
+      application_name: "dpines-api",
     });
+
+    // An idle client error must never crash the process — the pool will open a
+    // fresh connection for the next query.
+    pool.on("error", (err: Error) => {
+      console.warn("[DB] Idle client dropped by pooler (will reconnect):", err.message);
+    });
+
+    if (!/sslmode=/.test(connectionString)) {
+      console.warn(
+        "[DB] DATABASE_URL has no sslmode parameter; the Supabase pooler requires TLS."
+      );
+    }
 
     const adapter = new PrismaPg(pool);
     prismaClient = new PrismaClient({
