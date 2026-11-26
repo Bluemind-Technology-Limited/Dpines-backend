@@ -972,6 +972,10 @@ export class InvestmentService {
         where: { id: investmentId },
         data: {
           status: "completed" as any,
+          // The maturity request is settled: clear it so the admin's
+          // accept/decline panel disappears instead of lingering on a
+          // completed contribution.
+          maturity_action: null,
           updated_at: new Date(),
         } as any,
       });
