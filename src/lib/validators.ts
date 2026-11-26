@@ -129,7 +129,10 @@ export const updateLoanFinancialsSchema = z.object({
   status: z
     .enum(["pending", "approved", "active", "overdue", "completed", "rejected"])
     .optional(),
-  monthly_payment: z.number().nonnegative().optional(),
+  // The database enforces `loans_monthly_payment_check (monthly_payment > 0)`, so
+  // a zero installment must be rejected here as a 400 rather than blowing up as
+  // a constraint violation (500) inside the update.
+  monthly_payment: z.number().positive("Monthly payment must be greater than 0").optional(),
   total_interest: z.number().nonnegative().optional(),
   amount_paid: z.number().nonnegative().optional(),
   rolled_balance: z.number().nonnegative().optional(),

@@ -418,16 +418,25 @@ export class PaymentService {
       // baked into the remaining installments.
       if (rolledChanged) {
         const rate = Number((loan as any).interest_rate);
-        const term = Number((loan as any).term_months) || 0;
+        const term = Number((loan as any).term_months) || 1;
         const remaining = Math.max(1, term - markedPayments.length);
-        updateData.monthly_payment =
-          Math.round(
-            calculateMonthlyPayment(
-              calculation.newPrincipalBalance + newRolledBalance,
-              rate,
-              remaining
-            ) * 100
-          ) / 100;
+        const outstanding = calculation.newPrincipalBalance + newRolledBalance;
+
+        // A payment can settle the loan outright. There is then nothing left to
+        // amortise, so a plain recalculation returns 0 — which the database
+        // rejects (`loans_monthly_payment_check: monthly_payment > 0`) and used
+        // to abort the whole approval. A settled loan keeps its contractual
+        // installment instead of being zeroed out.
+        const recalculated =
+          outstanding > 0
+            ? Math.round(calculateMonthlyPayment(outstanding, rate, remaining) * 100) / 100
+            : Math.round(
+                calculateMonthlyPayment(Number((loan as any).amount), rate, term) * 100
+              ) / 100;
+
+        if (recalculated > 0) {
+          updateData.monthly_payment = recalculated;
+        }
       }
 
       const updatedLoan = await client.loans.update({
