@@ -333,7 +333,10 @@ export class UserService {
       });
 
       if (existingUser) {
-        throw new AppError(400, "User with this email already exists");
+        throw new AppError(
+          400,
+          "A member with this email already exists. Search the directory for them instead of adding a new account."
+        );
       }
 
       // 2. Create user in Supabase Auth
@@ -347,7 +350,17 @@ export class UserService {
       });
 
       if (authError || !authData.user) {
-        throw new AppError(400, authError?.message || "Failed to create auth user in Supabase");
+        const reason = authError?.message || "Failed to create auth user in Supabase";
+        // The profile check above only covers members. An email can still exist
+        // in Supabase Auth (e.g. a signup that never finished), which the auth
+        // API rejects — say so instead of surfacing the raw provider error.
+        if (/already|registered|exists/i.test(reason)) {
+          throw new AppError(
+            400,
+            "This email is already registered for sign-in, but has no member profile. Restore that account instead of creating a new one."
+          );
+        }
+        throw new AppError(400, reason);
       }
 
       // 3. Create profile in database using Prisma

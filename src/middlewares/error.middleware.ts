@@ -29,6 +29,9 @@ export const errorHandler = (
     res.status(400).json({
       success: false,
       error: "Validation error",
+      // Marked friendly: this message is meant for the user, so the client must
+      // not replace it with the generic "something went wrong" text.
+      friendly: true,
       details: err.errors.map((e) => ({
         path: e.path.join("."),
         message: e.message,
@@ -41,6 +44,9 @@ export const errorHandler = (
     res.status(err.statusCode).json({
       success: false,
       error: err.message,
+      // 4xx from our own domain layer is a business rule the caller can act on
+      // (duplicate email, insufficient balance, …). 5xx stays generic.
+      friendly: err.statusCode < 500,
     });
     return;
   }

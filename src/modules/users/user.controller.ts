@@ -112,6 +112,12 @@ export const updateUserProfileAdmin = asyncHandler(
     const body = updateUserProfileAdminSchema.parse(req.body);
     const adminId = (req.user as any)?.sub;
 
+    // Loans admins can correct a member's details, but only a full admin may
+    // grant a role. Silently drop the field instead of failing the whole edit.
+    if ((req.user as any)?.role !== "admin") {
+      delete (body as any).role;
+    }
+
     const user = await userService.updateUserProfileAdmin(userId, body, adminId);
 
     sendSuccess(res, user, "User profile updated successfully");
